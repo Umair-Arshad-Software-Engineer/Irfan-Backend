@@ -1,0 +1,36 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "main": "server.js",
+  "bin": "server.js",
+  "pkg": {
+    "targets": ["node18-win-x64"],
+    "assets": [
+      "src/**/*",
+      "uploads/**/*",
+      ".env"
+    ]
+  },
+  "scripts": {
+    "start": "nodemon server.js",
+    "dev": "nodemon server.js",
+    "build": "pkg . --output tech-soft"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "body-parser": "^2.2.2",
+    "cloudinary": "^1.41.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.0.2",
+    "multer-storage-cloudinary": "^4.0.0",
+    "mysql2": "^3.16.1",
+    "sequelize": "^6.37.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
+  }
+}
