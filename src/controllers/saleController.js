@@ -285,81 +285,159 @@ exports.createSale = async (req, res) => {
     let subtotal = 0;
     const itemSnapshots = [];
 
-    for (const item of items) {
-      if (!item.product_id) {
-        await t.rollback();
-        return res.status(400).json({ success: false, message: 'Each item must have a product_id' });
-      }
+    // for (const item of items) {
+    //   if (!item.product_id) {
+    //     await t.rollback();
+    //     return res.status(400).json({ success: false, message: 'Each item must have a product_id' });
+    //   }
 
-      const product = await Product.findByPk(item.product_id, { transaction: t });
-      if (!product) {
-        await t.rollback();
-        return res.status(404).json({ success: false, message: `Product id ${item.product_id} not found` });
-      }
+    //   const product = await Product.findByPk(item.product_id, { transaction: t });
+    //   if (!product) {
+    //     await t.rollback();
+    //     return res.status(404).json({ success: false, message: `Product id ${item.product_id} not found` });
+    //   }
 
-      let quantity = 0;
-      let weight = null;
-      let totalPrice = 0;
-      const unitPrice = parseFloat(item.unit_price ?? product.sale_price);
+    //   let quantity = 0;
+    //   let weight = null;
+    //   let totalPrice = 0;
+    //   const unitPrice = parseFloat(item.unit_price ?? product.sale_price);
 
-      if (isSarya) {
-        // SARYA mode: weight is required, quantity is ALWAYS 0
-        weight = item.weight != null ? parseFloat(item.weight) : null;
-        if (!weight || weight <= 0) {
-          await t.rollback();
-          return res.status(400).json({
-            success: false,
-            message: `SARYA mode requires a valid weight > 0 for each item (product_id: ${item.product_id})`,
-          });
-        }
-        quantity = 0; // ✅ CRITICAL: Set quantity to 0 for weight-based items
-        totalPrice = weight * unitPrice;
-        console.log(`SARYA item: product=${product.item_name}, weight=${weight}kg, price=${unitPrice}/kg, total=${totalPrice}, quantity=0`);
-      } else {
-        // FILLED mode: quantity is required
-        quantity = item.quantity ? parseInt(item.quantity) : 0;
-        if (!quantity || quantity < 1) {
-          await t.rollback();
-          return res.status(400).json({
-            success: false,
-            message: `Each item must have quantity >= 1 (product_id: ${item.product_id})`,
-          });
-        }
-        totalPrice = unitPrice * quantity;
+    //   if (isSarya) {
+    //     // SARYA mode: weight is required, quantity is ALWAYS 0
+    //     weight = item.weight != null ? parseFloat(item.weight) : null;
+    //     if (!weight || weight <= 0) {
+    //       await t.rollback();
+    //       return res.status(400).json({
+    //         success: false,
+    //         message: `SARYA mode requires a valid weight > 0 for each item (product_id: ${item.product_id})`,
+    //       });
+    //     }
+    //     quantity = 0; // ✅ CRITICAL: Set quantity to 0 for weight-based items
+    //     totalPrice = weight * unitPrice;
+    //     console.log(`SARYA item: product=${product.item_name}, weight=${weight}kg, price=${unitPrice}/kg, total=${totalPrice}, quantity=0`);
+    //   } else {
+    //     // FILLED mode: quantity is required
+    //     quantity = item.quantity ? parseInt(item.quantity) : 0;
+    //     if (!quantity || quantity < 1) {
+    //       await t.rollback();
+    //       return res.status(400).json({
+    //         success: false,
+    //         message: `Each item must have quantity >= 1 (product_id: ${item.product_id})`,
+    //       });
+    //     }
+    //     totalPrice = unitPrice * quantity;
         
-        // Stock check only for FILLED mode
-        if (product.available_qty < quantity) {
-          await t.rollback();
-          return res.status(400).json({
-            success: false,
-            message: `Insufficient stock for "${product.item_name}". Available: ${product.available_qty}`,
-          });
-        }
+    //     // Stock check only for FILLED mode
+    //     if (product.available_qty < quantity) {
+    //       await t.rollback();
+    //       return res.status(400).json({
+    //         success: false,
+    //         message: `Insufficient stock for "${product.item_name}". Available: ${product.available_qty}`,
+    //       });
+    //     }
         
-        console.log(`FILLED item: product=${product.item_name}, quantity=${quantity}, price=${unitPrice}, total=${totalPrice}`);
-      }
+    //     console.log(`FILLED item: product=${product.item_name}, quantity=${quantity}, price=${unitPrice}, total=${totalPrice}`);
+    //   }
 
-      subtotal += totalPrice;
+    //   subtotal += totalPrice;
 
-      const { selectedLengths, lengthQuantities, selectedLengthsDisplay, totalPieces } = parseLengthFields(item);
+    //   const { selectedLengths, lengthQuantities, selectedLengthsDisplay, totalPieces } = parseLengthFields(item);
 
-      itemSnapshots.push({
-        product_id: product.id,
-        product_name: product.item_name,
-        barcode: product.barcode,
-        unit_price: unitPrice,
-        quantity: quantity, // Will be 0 for SARYA, >0 for FILLED
-        total_price: totalPrice,
-        selected_lengths: selectedLengths,
-        length_quantities: lengthQuantities,
-        selected_lengths_display: selectedLengthsDisplay,
-        total_pieces: totalPieces,
-        weight: weight,
-        used_customer_price: item.used_customer_price === true,
-        _available_qty: product.available_qty,
-        _isSarya: isSarya,
+    //   itemSnapshots.push({
+    //     product_id: product.id,
+    //     product_name: product.item_name,
+    //     barcode: product.barcode,
+    //     unit_price: unitPrice,
+    //     quantity: quantity, // Will be 0 for SARYA, >0 for FILLED
+    //     total_price: totalPrice,
+    //     selected_lengths: selectedLengths,
+    //     length_quantities: lengthQuantities,
+    //     selected_lengths_display: selectedLengthsDisplay,
+    //     total_pieces: totalPieces,
+    //     weight: weight,
+    //     used_customer_price: item.used_customer_price === true,
+    //     _available_qty: product.available_qty,
+    //     _isSarya: isSarya,
+    //   });
+    // }
+    // In backend/src/controllers/saleController.js
+// Update the item snapshots creation
+
+// Inside createSale function, update the itemSnapshots.push section:
+
+for (const item of items) {
+  if (!item.product_id) {
+    await t.rollback();
+    return res.status(400).json({ success: false, message: 'Each item must have a product_id' });
+  }
+
+  const product = await Product.findByPk(item.product_id, { transaction: t });
+  if (!product) {
+    await t.rollback();
+    return res.status(404).json({ success: false, message: `Product id ${item.product_id} not found` });
+  }
+
+  let quantity = 0;
+  let weight = null;
+  let totalPrice = 0;
+  const unitPrice = parseFloat(item.unit_price ?? product.sale_price);
+
+  if (isSarya) {
+    weight = item.weight != null ? parseFloat(item.weight) : null;
+    if (!weight || weight <= 0) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `SARYA mode requires a valid weight > 0 for each item (product_id: ${item.product_id})`,
       });
     }
+    quantity = 0;
+    totalPrice = weight * unitPrice;
+  } else {
+    quantity = item.quantity ? parseInt(item.quantity) : 0;
+    if (!quantity || quantity < 1) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Each item must have quantity >= 1 (product_id: ${item.product_id})`,
+      });
+    }
+    totalPrice = unitPrice * quantity;
+    
+    if (product.available_qty < quantity) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient stock for "${product.item_name}". Available: ${product.available_qty}`,
+      });
+    }
+  }
+
+  subtotal += totalPrice;
+
+  const { selectedLengths, lengthQuantities, selectedLengthsDisplay, totalPieces } = parseLengthFields(item);
+
+  // ✅ ADD DESCRIPTION FIELD
+  const description = item.description?.trim() || null;
+
+  itemSnapshots.push({
+    product_id: product.id,
+    product_name: product.item_name,
+    description: description,  // ✅ ADD THIS
+    barcode: product.barcode,
+    unit_price: unitPrice,
+    quantity: quantity,
+    total_price: totalPrice,
+    selected_lengths: selectedLengths,
+    length_quantities: lengthQuantities,
+    selected_lengths_display: selectedLengthsDisplay,
+    total_pieces: totalPieces,
+    weight: weight,
+    used_customer_price: item.used_customer_price === true,
+    _available_qty: product.available_qty,
+    _isSarya: isSarya,
+  });
+}
 
     let discountAmount = 0;
     const discountVal = parseFloat(discount_value) || 0;
@@ -689,10 +767,14 @@ exports.updateSale = async (req, res) => {
           totalPieces,
         } = parseLengthFields(item);
 
+          const description = item.description?.trim() || null;
+
+
         newSnapshots.push({
           sale_id: parseInt(id),
           product_id: product.id,
           product_name: product.item_name,
+          description: description,  // ✅ ADD THIS
           barcode: product.barcode,
           unit_price: unitPrice,
           quantity,

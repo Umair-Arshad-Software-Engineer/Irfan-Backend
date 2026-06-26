@@ -1,3 +1,4 @@
+// backend/src/models/SaleItem.js
 const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize) => {
@@ -29,6 +30,13 @@ module.exports = (sequelize) => {
       validate: {
         notEmpty: { msg: 'Product name is required' }
       }
+    },
+    // ✅ ADD DESCRIPTION FIELD
+    description: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      defaultValue: null,
+      comment: 'Custom description for this sale item'
     },
     barcode: {
       type: DataTypes.STRING(100),
