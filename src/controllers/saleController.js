@@ -141,7 +141,7 @@ exports.getAllSales = async (req, res) => {
     const include = [
       {
         model: Customer, as: 'customer',
-        attributes: ['id', 'name', 'contact', 'customer_type'],
+        attributes: ['id', 'name', 'contact', 'customer_type', 'balance'],
         required: includeCustomer ? true : false,
         ...(search ? { where: { name: { [Op.like]: `%${search}%` } } } : {})
       },
@@ -150,7 +150,7 @@ exports.getAllSales = async (req, res) => {
         attributes: [
           'id', 'product_name', 'quantity', 'unit_price', 'total_price',
           'selected_lengths', 'length_quantities', 'selected_lengths_display',
-          'total_pieces', 'weight', 'used_customer_price'
+          'total_pieces', 'weight', 'used_customer_price', 'description'
         ],
         include: [
           { model: Product, as: 'product', attributes: ['id', 'item_name', 'barcode'], required: false },
@@ -169,6 +169,57 @@ exports.getAllSales = async (req, res) => {
       limit: limitNum, offset, distinct: true, subQuery: false,
     });
 
+    // ─────────────────────────────────────────────
+    //  Compute previous_balance for each sale
+    // ─────────────────────────────────────────────
+    const salesWithBalance = await Promise.all(sales.map(async (sale) => {
+      const saleJson = sale.toJSON();
+
+      if (!sale.customer_id) {
+        saleJson.previous_balance = 0;
+        saleJson.customer_balance = 0;
+        return saleJson;
+      }
+
+      // Find the FIRST ledger entry created for this sale (the 'sale' type entry)
+      const saleEntry = await CustomerLedger.findOne({
+        where: {
+          customer_id: sale.customer_id,
+          reference_id: sale.id,
+          transaction_type: 'sale',
+        },
+        order: [['id', 'ASC']],
+      });
+
+      let previousBalance = 0;
+
+      if (saleEntry) {
+        // The balance BEFORE this sale entry = current entry balance - credit + debit
+        // Since sale entries are credits: balance = prev + credit - debit
+        // So: prev = balance - credit + debit
+        previousBalance =
+          parseFloat(saleEntry.balance) -
+          parseFloat(saleEntry.credit) +
+          parseFloat(saleEntry.debit);
+      } else {
+        // Fallback: no ledger entry found, use customer current balance
+        // minus the remaining amount of this sale
+        const remaining = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
+        previousBalance = Math.max(
+          parseFloat(sale.customer?.balance ?? 0) - remaining,
+          0
+        );
+      }
+
+      saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
+      saleJson.customer_balance = parseFloat(sale.customer?.balance ?? 0);
+
+      return saleJson;
+    }));
+
+    // ─────────────────────────────────────────────
+    //  Summary
+    // ─────────────────────────────────────────────
     let summaryQuery = {
       where: { ...whereClause },
       attributes: [
@@ -195,7 +246,8 @@ exports.getAllSales = async (req, res) => {
     const totals = await Sale.findOne(summaryQuery);
 
     res.json({
-      success: true, data: sales,
+      success: true,
+      data: salesWithBalance,
       pagination: { total: count, page: pageNum, limit: limitNum, pages: Math.ceil(count / limitNum) },
       summary: {
         total_revenue: parseFloat(totals?.total_revenue) || 0,
