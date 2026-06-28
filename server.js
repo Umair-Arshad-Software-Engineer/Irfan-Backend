@@ -23,6 +23,7 @@ const customerPriceRoutes = require('./src/routes/customerPriceRoutes');
 const productImageRoutes = require('./src/routes/productImageRoutes');
 const purchaseOrderRoutes = require('./src/routes/purchaseOrderRoutes');
 const saleRoutes = require('./src/routes/saleRoutes');
+const saleImageRoutes = require('./src/routes/saleImageRoutes');     // ← ADD
 const customerLedgerRoutes = require('./src/routes/customerLedgerRoutes');
 const bankRoutes = require('./src/routes/bankRoutes');
 const chequeRoutes = require('./src/routes/cheque_routes');
@@ -49,20 +50,13 @@ function getLocalIP() {
 const udpServer = dgram.createSocket('udp4');
 
 udpServer.on('message', (msg, rinfo) => {
-  console.log(
-    `📨 UDP packet received from ${rinfo.address}:${rinfo.port}`
-  );
-
+  console.log(`📨 UDP packet received from ${rinfo.address}:${rinfo.port}`);
   console.log('Message:', msg.toString());
 
   if (msg.toString() === 'DISCOVER_SERVER') {
     const response = Buffer.from(
-      JSON.stringify({
-        ip: getLocalIP(),
-        port: PORT,
-      })
+      JSON.stringify({ ip: getLocalIP(), port: PORT })
     );
-
     udpServer.send(response, rinfo.port, rinfo.address);
   }
 });
@@ -86,8 +80,8 @@ process.on('uncaughtException', err => console.error('UNCAUGHT EXCEPTION:', err)
 process.on('unhandledRejection', err => console.error('UNHANDLED REJECTION:', err));
 
 app.use(cors({ origin: '*', credentials: true }));
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json({ limit: '50mb' }));           // ← increased for base64 images
+app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' })); // ← increased
 
 app.use('/api/auth', authRoutes);
 app.use('/api/categories', categoryRoutes);
@@ -100,6 +94,7 @@ app.use('/api/customer-prices', customerPriceRoutes);
 app.use('/api', productImageRoutes);
 app.use('/api/purchase-orders', purchaseOrderRoutes);
 app.use('/api/sales', saleRoutes);
+app.use('/api', saleImageRoutes);                      // ← ADD (mounts /api/sales/:saleId/images)
 app.use('/api/customer-ledger', customerLedgerRoutes);
 app.use('/api/banks', bankRoutes);
 app.use('/api/cheques', chequeRoutes);

@@ -145,10 +145,12 @@ exports.getAllSales = async (req, res) => {
         required: includeCustomer ? true : false,
         ...(search ? { where: { name: { [Op.like]: `%${search}%` } } } : {})
       },
+      // In getAllSales, change the SaleItem include attributes:
       {
         model: SaleItem, as: 'items',
         attributes: [
-          'id', 'product_name', 'quantity', 'unit_price', 'total_price',
+          'id', 'product_id',              // ← ADD product_id HERE
+          'product_name', 'quantity', 'unit_price', 'total_price',
           'selected_lengths', 'length_quantities', 'selected_lengths_display',
           'total_pieces', 'weight', 'used_customer_price', 'description'
         ],
