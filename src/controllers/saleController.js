@@ -180,10 +180,11 @@ exports.getAllSales = async (req, res) => {
       if (!sale.customer_id) {
         saleJson.previous_balance = 0;
         saleJson.customer_balance = 0;
+        saleJson.payment_details = null;
         return saleJson;
       }
 
-      // Find the FIRST ledger entry created for this sale (the 'sale' type entry)
+      // ── Previous balance calculation (your existing code) ──
       const saleEntry = await CustomerLedger.findOne({
         where: {
           customer_id: sale.customer_id,
@@ -194,18 +195,12 @@ exports.getAllSales = async (req, res) => {
       });
 
       let previousBalance = 0;
-
       if (saleEntry) {
-        // The balance BEFORE this sale entry = current entry balance - credit + debit
-        // Since sale entries are credits: balance = prev + credit - debit
-        // So: prev = balance - credit + debit
         previousBalance =
           parseFloat(saleEntry.balance) -
           parseFloat(saleEntry.credit) +
           parseFloat(saleEntry.debit);
       } else {
-        // Fallback: no ledger entry found, use customer current balance
-        // minus the remaining amount of this sale
         const remaining = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
         previousBalance = Math.max(
           parseFloat(sale.customer?.balance ?? 0) - remaining,
@@ -215,6 +210,33 @@ exports.getAllSales = async (req, res) => {
 
       saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
       saleJson.customer_balance = parseFloat(sale.customer?.balance ?? 0);
+
+      // ── NEW: Build payment_details from CustomerLedger payment entries ──
+      const paymentEntries = await CustomerLedger.findAll({
+        where: {
+          customer_id: sale.customer_id,
+          reference_id: sale.id,
+          transaction_type: 'payment',
+        },
+        order: [['id', 'ASC']],
+      });
+
+      if (paymentEntries.length > 0) {
+        const paymentDetails = {};
+        for (const entry of paymentEntries) {
+          const method = (entry.payment_method || 'cash').toLowerCase();
+          const amount = parseFloat(entry.debit) || 0;
+          if (amount > 0) {
+            paymentDetails[method] = (paymentDetails[method] || 0) + amount;
+          }
+        }
+        saleJson.payment_details = paymentDetails;
+      } else {
+        // Fallback: single method
+        const method = (sale.payment_method || 'cash').toLowerCase();
+        const paid = parseFloat(sale.amount_paid) || 0;
+        saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+      }
 
       return saleJson;
     }));
@@ -269,7 +291,10 @@ exports.getSaleById = async (req, res) => {
 
     const sale = await Sale.findByPk(id, {
       include: [
-        { model: Customer, as: 'customer', attributes: ['id', 'name', 'contact', 'address', 'email', 'customer_type'] },
+        { 
+          model: Customer, as: 'customer', 
+          attributes: ['id', 'name', 'contact', 'address', 'email', 'customer_type'] 
+        },
         {
           model: SaleItem, as: 'items',
           include: [
@@ -284,9 +309,46 @@ exports.getSaleById = async (req, res) => {
       ],
     });
 
-    if (!sale) return res.status(404).json({ success: false, message: 'Sale not found' });
+    if (!sale) {
+      return res.status(404).json({ success: false, message: 'Sale not found' });
+    }
 
-    res.json({ success: true, data: sale });
+    const saleJson = sale.toJSON();
+
+    // Build payment_details from ledger entries
+    if (sale.customer_id) {
+      const paymentEntries = await CustomerLedger.findAll({
+        where: {
+          customer_id: sale.customer_id,
+          reference_id: sale.id,
+          transaction_type: 'payment',
+        },
+        order: [['id', 'ASC']],
+      });
+
+      if (paymentEntries.length > 0) {
+        const paymentDetails = {};
+        for (const entry of paymentEntries) {
+          const method = (entry.payment_method || 'cash').toLowerCase();
+          const amount = parseFloat(entry.debit) || 0;
+          if (amount > 0) {
+            paymentDetails[method] = (paymentDetails[method] || 0) + amount;
+          }
+        }
+        saleJson.payment_details = paymentDetails;
+      } else {
+        const method = (sale.payment_method || 'cash').toLowerCase();
+        const paid = parseFloat(sale.amount_paid) || 0;
+        saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+      }
+    } else {
+      // No customer — use payment_method directly
+      const method = (sale.payment_method || 'cash').toLowerCase();
+      const paid = parseFloat(sale.amount_paid) || 0;
+      saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+    }
+
+    res.json({ success: true, data: saleJson });
   } catch (error) {
     console.error('Get sale by id error:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
