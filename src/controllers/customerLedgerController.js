@@ -166,10 +166,25 @@ exports.getCustomerLedger = async (req, res) => {
 
     // Calculate running balances for paginated entries
     let runningBalance = openingBalance;
+    // const entriesWithBalance = entries.map((entry) => {
+    //   runningBalance += parseFloat(entry.credit) - parseFloat(entry.debit);
+    //   return {
+    //     ...entry.toJSON(),
+    //     balance: parseFloat(runningBalance.toFixed(2)),
+    //   };
+    // });
+    // In getCustomerLedger function, update the entries mapping:
+
     const entriesWithBalance = entries.map((entry) => {
       runningBalance += parseFloat(entry.credit) - parseFloat(entry.debit);
+      const entryJson = entry.toJSON();
       return {
-        ...entry.toJSON(),
+        ...entryJson,
+        // ✅ Keep reference_number as is (could be user reference or invoice number)
+        // Add a separate field for invoice number if needed
+        invoice_number: entryJson.transaction_type === 'sale' || entryJson.transaction_type === 'payment' 
+          ? entryJson.reference_number 
+          : null,
         balance: parseFloat(runningBalance.toFixed(2)),
       };
     });

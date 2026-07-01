@@ -213,7 +213,7 @@ exports.createCustomerPayment = async (req, res) => {
           source_type: 'customer_payment',
           reference_id: ledgerEntry.id,
           reference_number: ledgerEntry.reference_number,
-          description: `Cash received from ${customer.name}`,
+          description: `وصل کیش ${customer.name}`,
           amount: paymentAmount,
           created_by: req.user?.id,
           transaction: dbTransaction,

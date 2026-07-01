@@ -302,6 +302,26 @@ exports.clearCheque = async (req, res) => {
       }
     }
 
+    // ✅ ADD THIS BLOCK — mirrors the supplier logic above
+if (cheque.customer_id && cheque.cheque_type === 'received') {
+  const paymentEntry = await CustomerLedger.findOne({
+    where: {
+      customer_id: cheque.customer_id,
+      cheque_number: cheque.cheque_number,
+      transaction_type: 'payment'
+    },
+    transaction: t
+  });
+
+  if (paymentEntry) {
+    await paymentEntry.update({
+      cheque_cleared: true,
+      cheque_cleared_date: cleared_date ? new Date(cleared_date) : new Date()
+    }, { transaction: t });
+    updatedLedgerEntry = paymentEntry;
+  }
+}
+
     await cheque.update({
       status: 'cleared',
       cleared_date: cleared_date || new Date().toISOString().split('T')[0],
