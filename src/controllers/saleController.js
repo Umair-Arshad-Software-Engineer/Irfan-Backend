@@ -177,10 +177,28 @@ exports.getAllSales = async (req, res) => {
     const salesWithBalance = await Promise.all(sales.map(async (sale) => {
       const saleJson = sale.toJSON();
 
+      // if (!sale.customer_id) {
+      //   saleJson.previous_balance = 0;
+      //   saleJson.customer_balance = 0;
+      //   saleJson.payment_details = null;
+      //   return saleJson;
+      // }
       if (!sale.customer_id) {
         saleJson.previous_balance = 0;
         saleJson.customer_balance = 0;
-        saleJson.payment_details = null;
+        const method = (sale.payment_method || 'cash').toLowerCase();
+        const paid = parseFloat(sale.amount_paid) || 0;
+        saleJson.payment_details = paid > 0
+          ? [{
+              method,
+              amount: paid,
+              date: sale.sale_date,
+              description: `Payment for ${sale.invoice_number}`,
+              reference_number: sale.reference || sale.invoice_number,
+              bank_name: null,
+              cheque_number: null,
+            }]
+          : [];
         return saleJson;
       }
 
@@ -221,21 +239,54 @@ exports.getAllSales = async (req, res) => {
         order: [['id', 'ASC']],
       });
 
+      // if (paymentEntries.length > 0) {
+      //   const paymentDetails = {};
+      //   for (const entry of paymentEntries) {
+      //     const method = (entry.payment_method || 'cash').toLowerCase();
+      //     const amount = parseFloat(entry.debit) || 0;
+      //     if (amount > 0) {
+      //       paymentDetails[method] = (paymentDetails[method] || 0) + amount;
+      //     }
+      //   }
+      //   saleJson.payment_details = paymentDetails;
+      // } else {
+      //   // Fallback: single method
+      //   const method = (sale.payment_method || 'cash').toLowerCase();
+      //   const paid = parseFloat(sale.amount_paid) || 0;
+      //   saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+      // }
       if (paymentEntries.length > 0) {
-        const paymentDetails = {};
+        const paymentDetails = [];
         for (const entry of paymentEntries) {
-          const method = (entry.payment_method || 'cash').toLowerCase();
           const amount = parseFloat(entry.debit) || 0;
           if (amount > 0) {
-            paymentDetails[method] = (paymentDetails[method] || 0) + amount;
+            paymentDetails.push({
+              method: (entry.payment_method || 'cash').toLowerCase(),
+              amount: amount,
+              date: entry.date,
+              description: entry.description || null,
+              reference_number: entry.reference_number || null,
+              bank_name: entry.bank_name || null,
+              cheque_number: entry.cheque_number || null,
+            });
           }
         }
         saleJson.payment_details = paymentDetails;
       } else {
-        // Fallback: single method
+        // Fallback: single method, no ledger entries yet
         const method = (sale.payment_method || 'cash').toLowerCase();
         const paid = parseFloat(sale.amount_paid) || 0;
-        saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+        saleJson.payment_details = paid > 0
+          ? [{
+              method,
+              amount: paid,
+              date: sale.sale_date,
+              description: `Initial payment for ${sale.invoice_number}`,
+              reference_number: sale.reference || sale.invoice_number,
+              bank_name: null,
+              cheque_number: null,
+            }]
+          : [];
       }
 
       return saleJson;
@@ -316,6 +367,38 @@ exports.getSaleById = async (req, res) => {
     const saleJson = sale.toJSON();
 
     // Build payment_details from ledger entries
+    // if (sale.customer_id) {
+    //   const paymentEntries = await CustomerLedger.findAll({
+    //     where: {
+    //       customer_id: sale.customer_id,
+    //       reference_id: sale.id,
+    //       transaction_type: 'payment',
+    //     },
+    //     order: [['id', 'ASC']],
+    //   });
+
+    //   if (paymentEntries.length > 0) {
+    //     const paymentDetails = {};
+    //     for (const entry of paymentEntries) {
+    //       const method = (entry.payment_method || 'cash').toLowerCase();
+    //       const amount = parseFloat(entry.debit) || 0;
+    //       if (amount > 0) {
+    //         paymentDetails[method] = (paymentDetails[method] || 0) + amount;
+    //       }
+    //     }
+    //     saleJson.payment_details = paymentDetails;
+    //   } else {
+    //     const method = (sale.payment_method || 'cash').toLowerCase();
+    //     const paid = parseFloat(sale.amount_paid) || 0;
+    //     saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+    //   }
+    // } else {
+    //   // No customer — use payment_method directly
+    //   const method = (sale.payment_method || 'cash').toLowerCase();
+    //   const paid = parseFloat(sale.amount_paid) || 0;
+    //   saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+    // }
+    // Build payment_details from ledger entries
     if (sale.customer_id) {
       const paymentEntries = await CustomerLedger.findAll({
         where: {
@@ -327,25 +410,52 @@ exports.getSaleById = async (req, res) => {
       });
 
       if (paymentEntries.length > 0) {
-        const paymentDetails = {};
+        const paymentDetails = [];
         for (const entry of paymentEntries) {
-          const method = (entry.payment_method || 'cash').toLowerCase();
           const amount = parseFloat(entry.debit) || 0;
           if (amount > 0) {
-            paymentDetails[method] = (paymentDetails[method] || 0) + amount;
+            paymentDetails.push({
+              method: (entry.payment_method || 'cash').toLowerCase(),
+              amount: amount,
+              date: entry.date,
+              description: entry.description || null,
+              reference_number: entry.reference_number || null,
+              bank_name: entry.bank_name || null,
+              cheque_number: entry.cheque_number || null,
+            });
           }
         }
         saleJson.payment_details = paymentDetails;
       } else {
         const method = (sale.payment_method || 'cash').toLowerCase();
         const paid = parseFloat(sale.amount_paid) || 0;
-        saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+        saleJson.payment_details = paid > 0
+          ? [{
+              method,
+              amount: paid,
+              date: sale.sale_date,
+              description: `Initial payment for ${sale.invoice_number}`,
+              reference_number: sale.reference || sale.invoice_number,
+              bank_name: null,
+              cheque_number: null,
+            }]
+          : [];
       }
     } else {
       // No customer — use payment_method directly
       const method = (sale.payment_method || 'cash').toLowerCase();
       const paid = parseFloat(sale.amount_paid) || 0;
-      saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+      saleJson.payment_details = paid > 0
+        ? [{
+            method,
+            amount: paid,
+            date: sale.sale_date,
+            description: `Payment for ${sale.invoice_number}`,
+            reference_number: sale.reference || sale.invoice_number,
+            bank_name: null,
+            cheque_number: null,
+          }]
+        : [];
     }
 
     res.json({ success: true, data: saleJson });
@@ -1653,8 +1763,8 @@ exports.recordPayment = async (req, res) => {
     
     if (payment_method === 'bank' && selectedBank) {
       paymentNotes = notes 
-        ? `${notes}\n${selectedBank.name} کو بینک ٹرانسفر کے ذریعے ادائیگی`
-        : `${selectedBank.name} کو بینک ٹرانسفر کے ذریعے ادائیگی`;
+        ? `${notes}\n${selectedBank.name}  بینک ٹرانسفر کے ذریعے ادائیگی`
+        : `${selectedBank.name}  بینک ٹرانسفر کے ذریعے ادائیگی`;
     }
 
     // If no specific payment notes but we have general notes
@@ -1688,7 +1798,10 @@ exports.recordPayment = async (req, res) => {
     if (sale.customer_id) {
       // Build Urdu description for ledger
       let ledgerDescription = paymentNotes || `ادائیگی موصول ہوئی - ${sale.invoice_number} (${methodLabel})`;
-      
+      // ✅ Add manual notes if provided
+      if (notes) {
+        ledgerDescription = `${ledgerDescription}\n${notes}`;
+      }
       await createLedgerEntry({
         customerId: sale.customer_id,
         date: payment_date || new Date(),
@@ -1740,10 +1853,16 @@ exports.recordPayment = async (req, res) => {
       const methodLabel = methodDescMap[payment_method] || payment_method;
       const bankLabel = selectedBank?.name || bank_name;
 
+      // const descParts = [
+      //   `ادائیگی وصول - ${sale.customer?.name || 'کسٹمر'}`,
+      //   bankLabel ? `| بینک: ${bankLabel}` : null,
+      //   cheque_number ? `| چیک #: ${cheque_number}` : null,
+      // ].filter(Boolean).join(' ');
       const descParts = [
         `ادائیگی وصول - ${sale.customer?.name || 'کسٹمر'}`,
         bankLabel ? `| بینک: ${bankLabel}` : null,
         cheque_number ? `| چیک #: ${cheque_number}` : null,
+        notes ? `| ${notes}` : null,  // ✅ ADD MANUAL NOTES HERE
       ].filter(Boolean).join(' ');
 
       await createSimpleCashbookEntry({
@@ -1751,7 +1870,8 @@ exports.recordPayment = async (req, res) => {
         entry_type: 'cash_in',
         source_type: 'customer_payment',
         reference_id: sale.id,
-        reference_number: sale.invoice_number,
+        // reference_number: sale.invoice_number,
+        reference_number: sale.reference || sale.invoice_number, // ✅ Use reference if available, fallback to invoice_number
         description: descParts,
         amount: paymentAmount,
         created_by: req.user?.id,
