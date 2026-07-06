@@ -1,5 +1,5 @@
 // controllers/employeeController.js
-const { Employee, Attendance } = require('../models');
+const { Employee } = require('../models');
 
 // ── GET all employees ─────────────────────────────────────────────────────────
 exports.getAllEmployees = async (req, res) => {
@@ -32,15 +32,31 @@ exports.getEmployeeById = async (req, res) => {
 // ── CREATE employee ───────────────────────────────────────────────────────────
 exports.createEmployee = async (req, res) => {
   try {
-    const { name, father_name, phone, address, salary, salary_type } = req.body;
+    const { 
+      name, father_name, phone, address, salary, salary_type, 
+      join_date, contract_unit, unit_price, overtime_rate, 
+      standard_working_hours 
+    } = req.body;
 
     if (!name || !father_name || !phone || salary == null || !salary_type) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
-    const employee = await Employee.create({
-      name, father_name, phone, address, salary, salary_type,
-    });
+    const employeeData = {
+      name, 
+      father_name, 
+      phone, 
+      address, 
+      salary, 
+      salary_type,
+      join_date: join_date || new Date().toISOString().split('T')[0],
+      contract_unit: contract_unit || null,
+      unit_price: unit_price || null,
+      overtime_rate: overtime_rate || null,
+      standard_working_hours: standard_working_hours || 8,
+    };
+
+    const employee = await Employee.create(employeeData);
 
     res.status(201).json({
       success: true,
@@ -57,14 +73,22 @@ exports.createEmployee = async (req, res) => {
 exports.updateEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, father_name, phone, address, salary, salary_type, is_active } = req.body;
+    const { 
+      name, father_name, phone, address, salary, salary_type, 
+      is_active, join_date, contract_unit, unit_price, 
+      overtime_rate, standard_working_hours 
+    } = req.body;
 
     const employee = await Employee.findByPk(id);
     if (!employee) {
       return res.status(404).json({ success: false, message: 'Employee not found' });
     }
 
-    await employee.update({ name, father_name, phone, address, salary, salary_type, is_active });
+    await employee.update({ 
+      name, father_name, phone, address, salary, salary_type, 
+      is_active, join_date, contract_unit, unit_price, 
+      overtime_rate, standard_working_hours 
+    });
 
     res.json({
       success: true,

@@ -1,3 +1,4 @@
+// models/index.js
 const sequelize = require('../config/db');
 
 const User = require('./User');
@@ -17,7 +18,7 @@ const initPurchaseReceiptItem = require('./PurchaseReceiptItem');
 const initSupplierLedger = require('./SupplierLedger');
 const initSale = require('./Sale');
 const initSaleItem = require('./SaleItem');
-const initSaleImage = require('./SaleImage');           // ← ADD
+const initSaleImage = require('./SaleImage');
 const initCustomerLedger = require('./CustomerLedger');
 const initBank = require('./Bank');
 const initBankTransaction = require('./BankTransaction');
@@ -27,11 +28,12 @@ const initCashbook = require('./Cashbook');
 const initSimpleCashbook = require('./SimpleCashbook');
 const initDailyExpenseSession = require('./dailyExpenseSession');
 const initDailyExpense = require('./dailyExpense');
-const initEmployee        = require('./Employee');
-const initAttendance      = require('./Attendance');
-const initSalaryPayment   = require('./SalaryPayment');
-const initAdvancePayment  = require('./AdvancePayment');
+const initEmployee = require('./Employee');
+const initAttendance = require('./Attendance');
+const initSalaryPayment = require('./SalaryPayment');
+const initAdvancePayment = require('./AdvancePayment');
 const initEmployeeExpense = require('./EmployeeExpense');
+const initContractWorkEntry = require('./ContractWorkEntry'); // ← NEW
 
 const Category = initCategory(sequelize);
 const Subcategory = initSubcategory(sequelize);
@@ -48,7 +50,7 @@ const PurchaseReceiptItem = initPurchaseReceiptItem(sequelize);
 const SupplierLedger = initSupplierLedger(sequelize);
 const Sale = initSale(sequelize);
 const SaleItem = initSaleItem(sequelize);
-const SaleImage = initSaleImage(sequelize);            // ← ADD
+const SaleImage = initSaleImage(sequelize);
 const CustomerLedger = initCustomerLedger(sequelize);
 const Bank = initBank(sequelize);
 const BankTransaction = initBankTransaction(sequelize);
@@ -58,11 +60,12 @@ const Cashbook = initCashbook(sequelize);
 const SimpleCashbook = initSimpleCashbook(sequelize);
 const DailyExpenseSession = initDailyExpenseSession(sequelize);
 const DailyExpense = initDailyExpense(sequelize);
-const Employee        = initEmployee(sequelize);
-const Attendance      = initAttendance(sequelize);
-const SalaryPayment   = initSalaryPayment(sequelize);
-const AdvancePayment  = initAdvancePayment(sequelize);
+const Employee = initEmployee(sequelize);
+const Attendance = initAttendance(sequelize);
+const SalaryPayment = initSalaryPayment(sequelize);
+const AdvancePayment = initAdvancePayment(sequelize);
 const EmployeeExpense = initEmployeeExpense(sequelize);
+const ContractWorkEntry = initContractWorkEntry(sequelize); // ← NEW
 
 // ── Associations ─────────────────────────────────────────────────────────────
 
@@ -113,12 +116,12 @@ PurchaseReceiptItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product'
 
 Sale.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
 Sale.hasMany(SaleItem, { foreignKey: 'sale_id', as: 'items', onDelete: 'CASCADE' });
-Sale.hasMany(SaleImage, { foreignKey: 'sale_id', as: 'saleImages', onDelete: 'CASCADE' }); // ← ADD
+Sale.hasMany(SaleImage, { foreignKey: 'sale_id', as: 'saleImages', onDelete: 'CASCADE' });
 
 SaleItem.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
 SaleItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 
-SaleImage.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });                          // ← ADD
+SaleImage.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
 
 Bank.hasMany(BankTransaction, { foreignKey: 'bank_id', as: 'transactions', onDelete: 'CASCADE' });
 Bank.hasMany(Cheque, { foreignKey: 'bank_id', as: 'cheques', onDelete: 'CASCADE' });
@@ -142,22 +145,27 @@ DailyExpense.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
 DailyExpense.belongsTo(Bank, { foreignKey: 'bank_id', as: 'bank' });
 
 // ── Employee associations ─────────────────────────────────────────────────────
-Employee.hasMany(Attendance,       { foreignKey: 'employee_id', as: 'attendances',      onDelete: 'CASCADE' });
-Attendance.belongsTo(Employee,     { foreignKey: 'employee_id', as: 'employee' });
+Employee.hasMany(Attendance, { foreignKey: 'employee_id', as: 'attendances', onDelete: 'CASCADE' });
+Attendance.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 
-Employee.hasMany(SalaryPayment,    { foreignKey: 'employee_id', as: 'salaryPayments',   onDelete: 'CASCADE' });
-SalaryPayment.belongsTo(Employee,  { foreignKey: 'employee_id', as: 'employee' });
+Employee.hasMany(SalaryPayment, { foreignKey: 'employee_id', as: 'salaryPayments', onDelete: 'CASCADE' });
+SalaryPayment.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 
-Employee.hasMany(AdvancePayment,   { foreignKey: 'employee_id', as: 'advances',         onDelete: 'CASCADE' });
+Employee.hasMany(AdvancePayment, { foreignKey: 'employee_id', as: 'advances', onDelete: 'CASCADE' });
 AdvancePayment.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 
-Employee.hasMany(EmployeeExpense,   { foreignKey: 'employee_id', as: 'expenses',        onDelete: 'CASCADE' });
+Employee.hasMany(EmployeeExpense, { foreignKey: 'employee_id', as: 'expenses', onDelete: 'CASCADE' });
 EmployeeExpense.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 
-SalaryPayment.hasMany(AdvancePayment,  { foreignKey: 'salary_payment_id', as: 'recoveredAdvances' });
+// ── Contract Work associations ────────────────────────────────────────────────
+Employee.hasMany(ContractWorkEntry, { foreignKey: 'employee_id', as: 'contractWorkEntries', onDelete: 'CASCADE' });
+ContractWorkEntry.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+
+// ── Salary Payment associations ──────────────────────────────────────────────
+SalaryPayment.hasMany(AdvancePayment, { foreignKey: 'salary_payment_id', as: 'recoveredAdvances' });
 AdvancePayment.belongsTo(SalaryPayment, { foreignKey: 'salary_payment_id', as: 'salaryPayment' });
 
-SalaryPayment.hasMany(EmployeeExpense,  { foreignKey: 'salary_payment_id', as: 'recoveredExpenses' });
+SalaryPayment.hasMany(EmployeeExpense, { foreignKey: 'salary_payment_id', as: 'recoveredExpenses' });
 EmployeeExpense.belongsTo(SalaryPayment, { foreignKey: 'salary_payment_id', as: 'salaryPayment' });
 
 // Cashbook / SimpleCashbook — standalone, no FK associations
@@ -179,7 +187,7 @@ module.exports = {
   SupplierLedger,
   Sale,
   SaleItem,
-  SaleImage,           // ← ADD
+  SaleImage,
   CustomerLedger,
   Bank,
   BankTransaction,
@@ -195,4 +203,5 @@ module.exports = {
   SalaryPayment,
   AdvancePayment,
   EmployeeExpense,
+  ContractWorkEntry, // ← NEW
 };

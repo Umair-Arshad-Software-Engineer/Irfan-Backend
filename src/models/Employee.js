@@ -1,3 +1,4 @@
+// models/Employee.js
 const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize) => {
@@ -24,7 +25,7 @@ module.exports = (sequelize) => {
     },
     address: {
       type: DataTypes.TEXT,
-      allowNull: true,
+      allowNull: false,
     },
     salary: {
       type: DataTypes.DECIMAL(10, 2),
@@ -39,6 +40,30 @@ module.exports = (sequelize) => {
     is_active: {
       type: DataTypes.BOOLEAN,
       defaultValue: true,
+    },
+    join_date: {
+      type: DataTypes.DATEONLY,
+      allowNull: true,
+    },
+    contract_unit: {
+      type: DataTypes.ENUM('bag', 'kg', 'ton', 'meter', 'piece'),
+      allowNull: true,
+    },
+    unit_price: {
+      type: DataTypes.DECIMAL(10, 2),
+      allowNull: true,
+      validate: { min: 0 },
+    },
+    overtime_rate: {
+      type: DataTypes.DECIMAL(10, 2),
+      allowNull: true,
+      validate: { min: 0 },
+    },
+    standard_working_hours: {
+      type: DataTypes.DECIMAL(5, 2),
+      allowNull: true,
+      defaultValue: 8,
+      validate: { min: 0 },
     },
   }, {
     tableName: 'employees',

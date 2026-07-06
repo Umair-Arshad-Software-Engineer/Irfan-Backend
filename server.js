@@ -1,3 +1,4 @@
+// server.js
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
@@ -23,18 +24,21 @@ const customerPriceRoutes = require('./src/routes/customerPriceRoutes');
 const productImageRoutes = require('./src/routes/productImageRoutes');
 const purchaseOrderRoutes = require('./src/routes/purchaseOrderRoutes');
 const saleRoutes = require('./src/routes/saleRoutes');
-const saleImageRoutes = require('./src/routes/saleImageRoutes');     // ← ADD
+const saleImageRoutes = require('./src/routes/saleImageRoutes');
 const customerLedgerRoutes = require('./src/routes/customerLedgerRoutes');
 const bankRoutes = require('./src/routes/bankRoutes');
 const chequeRoutes = require('./src/routes/cheque_routes');
 const cashbookRoutes = require('./src/routes/cashbookRoutes');
 const simpleCashbookRoutes = require('./src/routes/simpleCashbookRoutes');
 const expenseRoutes = require('./src/routes/expenseRoutes');
-const employeeRoutes   = require('./src/routes/employeeRoutes');
+
+// Employee modules
+const employeeRoutes = require('./src/routes/employeeRoutes');
 const attendanceRoutes = require('./src/routes/attendanceRoutes');
-const salaryRoutes     = require('./src/routes/salaryRoutes');
-const advanceRoutes    = require('./src/routes/advanceRoutes');
+const salaryRoutes = require('./src/routes/salaryRoutes');
+const advanceRoutes = require('./src/routes/advanceRoutes');
 const empExpenseRoutes = require('./src/routes/empExpenseRoutes');
+const contractWorkRoutes = require('./src/routes/contractWorkRoutes'); // ← NEW
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -80,9 +84,10 @@ process.on('uncaughtException', err => console.error('UNCAUGHT EXCEPTION:', err)
 process.on('unhandledRejection', err => console.error('UNHANDLED REJECTION:', err));
 
 app.use(cors({ origin: '*', credentials: true }));
-app.use(bodyParser.json({ limit: '50mb' }));           // ← increased for base64 images
-app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' })); // ← increased
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
+// ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/subcategories', subcategoryRoutes);
@@ -94,19 +99,23 @@ app.use('/api/customer-prices', customerPriceRoutes);
 app.use('/api', productImageRoutes);
 app.use('/api/purchase-orders', purchaseOrderRoutes);
 app.use('/api/sales', saleRoutes);
-app.use('/api', saleImageRoutes);                      // ← ADD (mounts /api/sales/:saleId/images)
+app.use('/api', saleImageRoutes);
 app.use('/api/customer-ledger', customerLedgerRoutes);
 app.use('/api/banks', bankRoutes);
 app.use('/api/cheques', chequeRoutes);
 app.use('/api/cashbook', cashbookRoutes);
 app.use('/api/simple-cashbook', simpleCashbookRoutes);
 app.use('/api/expense-sessions', expenseRoutes);
-app.use('/api/employees',   employeeRoutes);
-app.use('/api/attendance',  attendanceRoutes);
-app.use('/api/salary',      salaryRoutes);
-app.use('/api/advances',     advanceRoutes);
-app.use('/api/emp-expenses', empExpenseRoutes);
 
+// ── Employee Routes ──────────────────────────────────────────────────────────
+app.use('/api/employees', employeeRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api/salary', salaryRoutes);
+app.use('/api/advances', advanceRoutes);
+app.use('/api/emp-expenses', empExpenseRoutes);
+app.use('/api/contract-work', contractWorkRoutes); // ← NEW
+
+// ── Static files ─────────────────────────────────────────────────────────────
 const uploadsPath = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsPath)) {
   fs.mkdirSync(uploadsPath, { recursive: true });
@@ -118,6 +127,7 @@ app.get('/', (req, res) => {
   res.json({ message: 'API running', timestamp: new Date().toISOString() });
 });
 
+// ── Seed Admin User ──────────────────────────────────────────────────────────
 async function seedAdminUser() {
   try {
     const existing = await User.findOne({ where: { email: ADMIN_USER.email } });
@@ -130,11 +140,13 @@ async function seedAdminUser() {
       email: ADMIN_USER.email,
       password: ADMIN_USER.password,
     });
+    console.log('✅ Admin user seeded successfully');
   } catch (err) {
     console.error('❌ Failed to seed admin user:', err.message);
   }
 }
 
+// ── Start Server ─────────────────────────────────────────────────────────────
 (async () => {
   try {
     await sequelize.authenticate();
@@ -147,6 +159,7 @@ async function seedAdminUser() {
 
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`📍 Local IP: ${getLocalIP()}`);
     });
   } catch (err) {
     console.error('❌ Database error:', err);

@@ -1,6 +1,6 @@
-// controllers/salaryController.js  (updated)
+// controllers/salaryController.js
 const { Op } = require('sequelize');
-const { Employee, Attendance, SalaryPayment, AdvancePayment, EmployeeExpense } = require('../models');
+const { Employee, Attendance, SalaryPayment, AdvancePayment, EmployeeExpense, ContractWorkEntry } = require('../models');
 
 // ── Helper: calendar days (inclusive) ────────────────────────────────────────
 function countCalendarDays(from, to) {
@@ -26,11 +26,8 @@ async function hasOverlap(employee_id, from_date, to_date, excludeId = null) {
   const where = {
     employee_id,
     [Op.or]: [
-      // existing record starts inside new range
       { from_date: { [Op.between]: [from_date, to_date] } },
-      // existing record ends inside new range
       { to_date:   { [Op.between]: [from_date, to_date] } },
-      // existing record completely wraps the new range
       {
         from_date: { [Op.lte]: from_date },
         to_date:   { [Op.gte]: to_date },
@@ -69,7 +66,14 @@ exports.calculateSalary = async (req, res) => {
     } else if (employee.salary_type === 'Daily') {
       calculatedSalary = present * baseSalary;
     } else {
-      calculatedSalary = baseSalary;   // Contract
+      // Contract - get work entries
+      const workEntries = await ContractWorkEntry.findAll({
+        where: {
+          employee_id,
+          date: { [Op.between]: [from_date, to_date] },
+        },
+      });
+      calculatedSalary = workEntries.reduce((sum, e) => sum + parseFloat(e.total_amount), 0);
     }
 
     // ── Pending advances & expenses for this employee ─────────────────────────
@@ -116,7 +120,7 @@ exports.calculateSalary = async (req, res) => {
   }
 };
 
-// ── SAVE salary payment (with overlap guard + deduction marking) ──────────────
+// ── SAVE salary payment ──────────────────────────────────────────────────────
 exports.saveSalaryPayment = async (req, res) => {
   try {
     const {
@@ -124,7 +128,7 @@ exports.saveSalaryPayment = async (req, res) => {
       total_days, present_days, absent_days, half_days, leave_days,
       base_salary, calculated_salary, paid_amount,
       advance_deduction, expense_deduction,
-      advance_ids, expense_ids,      // arrays of IDs to mark as recovered
+      advance_ids, expense_ids,
       notes, payment_date,
     } = req.body;
 
@@ -138,7 +142,7 @@ exports.saveSalaryPayment = async (req, res) => {
     if (overlap) {
       return res.status(409).json({
         success: false,
-        message: `A salary record already exists for ${employee.name} that overlaps with ${from_date} to ${to_date}. Please choose a different date range.`,
+        message: `A salary record already exists for ${employee.name} that overlaps with ${from_date} to ${to_date}.`,
       });
     }
 
@@ -211,7 +215,7 @@ exports.getAllSalaryPayments = async (req, res) => {
   }
 };
 
-// ── DELETE salary payment (also un-recovers advances/expenses) ────────────────
+// ── DELETE salary payment ────────────────────────────────────────────────────
 exports.deleteSalaryPayment = async (req, res) => {
   try {
     const { id } = req.params;

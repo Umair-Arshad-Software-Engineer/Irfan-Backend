@@ -1381,6 +1381,7 @@ exports.getDailySummary = async (req, res) => {
 };
 
 
+
 // exports.recordPayment = async (req, res) => {
 //   const t = await sequelize.transaction();
 //   try {
@@ -1449,15 +1450,18 @@ exports.getDailySummary = async (req, res) => {
 //         });
 //       }
 
-//       // Create cheque record (RECEIVED from customer)
+//       // Build cheque description
+//       let chequeDescription = notes 
+//         ? notes 
+//         : `${sale.customer?.name || 'کسٹمر'} کی جانب سے ${sale.reference} کی ادائیگی`;
+
 //       const cheque = await Cheque.create({
 //         bank_id: bank_id,
 //         cheque_number: cheque_number,
 //         cheque_type: 'received',
 //         amount: paymentAmount,
 //         payee_payer_name: sale.customer?.name || 'Customer',
-//         // description: notes || `Payment received from customer for ${sale.invoice_number}`,
-//         description: notes || `${sale.customer?.name || 'کسٹمر'} کی جانب سے ${sale.reference} کی ادائیگی`,
+//         description: chequeDescription,
 //         issue_date: payment_date ? new Date(payment_date) : new Date(),
 //         due_date: cheque_date ? new Date(cheque_date) : null,
 //         status: 'pending',
@@ -1480,12 +1484,16 @@ exports.getDailySummary = async (req, res) => {
 //         { transaction: t }
 //       );
 
+//       // Build bank transaction description - ONLY here, not duplicated
+//       let bankDescription = notes 
+//         ? `${notes} - ${sale.customer?.name || 'کسٹمر'} کی جانب سے ادائیگی`
+//         : `${sale.customer?.name || 'کسٹمر'} کی جانب سے ادائیگی موصول`;
+
 //       bankTransaction = await BankTransaction.create({
 //         bank_id: bank_id,
 //         transaction_type: 'in',
 //         amount: paymentAmount.toFixed(2),
-//         // description: notes || `Payment received from ${sale.customer?.name || 'Customer'} for ${sale.invoice_number}`,
-//         description: notes || `${sale.customer?.name || 'کسٹمر'} کی جانب سے  ادائیگی موصول`,
+//         description: bankDescription,
 //         reference_number: sale.reference || sale.invoice_number,
 //         balance_after: newBalance.toFixed(2),
 //         created_by: req.user?.id,
@@ -1499,8 +1507,6 @@ exports.getDailySummary = async (req, res) => {
 //     const newPaid = parseFloat(sale.amount_paid) + paymentAmount;
 //     const newStatus = newPaid >= parseFloat(sale.grand_total) ? 'paid' : 'partial';
 
-//     let paymentNotes = notes || '';
-    
 //     // Urdu translations for payment method labels
 //     const methodLabels = {
 //       cash: 'نقد',
@@ -1512,26 +1518,34 @@ exports.getDailySummary = async (req, res) => {
     
 //     const methodLabel = methodLabels[payment_method] || payment_method;
 
-//     // Build Urdu payment notes
+//     // Build payment notes for sale - SINGLE SOURCE OF TRUTH
+//     let paymentNotes = '';
+
 //     if (payment_method === 'cheque' && cheque_number) {
 //       const bankName = selectedBank?.name || bank_name || 'N/A';
 //       const dateStr = cheque_date ? new Date(cheque_date).toISOString().split('T')[0] : 'N/A';
 //       paymentNotes = notes 
-//         ? `${notes}\nچیک #${cheque_number} کے ذریعے ادائیگی، بینک: ${bankName}، تاریخ: ${dateStr}`
+//         ? `${notes} | چیک #${cheque_number}، بینک: ${bankName}، تاریخ: ${dateStr}`
 //         : `چیک #${cheque_number} کے ذریعے ادائیگی، بینک: ${bankName}، تاریخ: ${dateStr}`;
-//     }
-    
-//     if (payment_method === 'bank' && selectedBank) {
+//     } else if (payment_method === 'bank' && selectedBank) {
 //       paymentNotes = notes 
-//         ? `${notes}\n${selectedBank.name}  بنک ٹرانسفر`
-//         : `${selectedBank.name} بنک ٹرانسفر`;
+//         ? `${notes} | ${selectedBank.name} بینک ٹرانسفر`
+//         : `${selectedBank.name} بینک ٹرانسفر`;
+//     } else if (payment_method === 'cash') {
+//       paymentNotes = notes 
+//         ? `${notes} | نقد ادائیگی`
+//         : `نقد ادائیگی`;
+//     } else if (payment_method === 'slip') {
+//       const bankName = selectedBank?.name || bank_name || 'N/A';
+//       paymentNotes = notes 
+//         ? `${notes} | سلیپ ادائیگی، بینک: ${bankName}`
+//         : `سلیپ ادائیگی، بینک: ${bankName}`;
+//     } else {
+//       // Default: just use notes if provided
+//       paymentNotes = notes || '';
 //     }
 
-//     // If no specific payment notes but we have general notes
-//     if (!paymentNotes && notes) {
-//       paymentNotes = notes;
-//     }
-
+//     // Update sale with payment notes
 //     await sale.update({
 //       amount_paid: newPaid,
 //       payment_status: newStatus,
@@ -1553,15 +1567,12 @@ exports.getDailySummary = async (req, res) => {
 //     }
 
 //     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 6: Create customer ledger entry with Urdu description
+//     // STEP 6: Create customer ledger entry
 //     // ═══════════════════════════════════════════════════════════════════════
 //     if (sale.customer_id) {
-//       // Build Urdu description for ledger
-//       let ledgerDescription = paymentNotes || `ادائیگی موصول ہوئی - ${sale.invoice_number} (${methodLabel})`;
-//       // ✅ Add manual notes if provided
-//       if (notes) {
-//         ledgerDescription = `${ledgerDescription}\n${notes}`;
-//       }
+//       // Build ledger description - use paymentNotes without duplication
+//       let ledgerDescription = paymentNotes || `ادائیگی موصول - ${sale.reference || sale.invoice_number} (${methodLabel})`;
+
 //       await createLedgerEntry({
 //         customerId: sale.customer_id,
 //         date: payment_date || new Date(),
@@ -1584,7 +1595,7 @@ exports.getDailySummary = async (req, res) => {
 //     }
 
 //     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 7: Cashbook entries with Urdu descriptions
+//     // STEP 7: Cashbook entries
 //     // ═══════════════════════════════════════════════════════════════════════
     
 //     // Cash payment
@@ -1594,7 +1605,7 @@ exports.getDailySummary = async (req, res) => {
 //         entry_type: 'cash_in',
 //         source_type: 'customer_payment',
 //         reference_id: sale.id,
-//         reference_number: sale.invoice_number,
+//         reference_number: sale.reference || sale.invoice_number,
 //         description: `کیش وصول - ${sale.customer?.name || 'کسٹمر'}`,
 //         amount: paymentAmount,
 //         created_by: req.user?.id,
@@ -1602,7 +1613,7 @@ exports.getDailySummary = async (req, res) => {
 //       });
 //     }
 
-//     // Simple cashbook — ALL methods with Urdu
+//     // Simple cashbook — ALL methods with proper description
 //     if (from_simple_cashbook) {
 //       const methodDescMap = {
 //         cash: 'نقد',
@@ -1610,19 +1621,15 @@ exports.getDailySummary = async (req, res) => {
 //         cheque: 'چیک',
 //         slip: 'سلیپ',
 //       };
-//       const methodLabel = methodDescMap[payment_method] || payment_method;
+//       const methodLabelSimple = methodDescMap[payment_method] || payment_method;
 //       const bankLabel = selectedBank?.name || bank_name;
 
-//       // const descParts = [
-//       //   `ادائیگی وصول - ${sale.customer?.name || 'کسٹمر'}`,
-//       //   bankLabel ? `| بینک: ${bankLabel}` : null,
-//       //   cheque_number ? `| چیک #: ${cheque_number}` : null,
-//       // ].filter(Boolean).join(' ');
+//       // Build description parts - SINGLE SOURCE
 //       const descParts = [
 //         `ادائیگی وصول - ${sale.customer?.name || 'کسٹمر'}`,
 //         bankLabel ? `| بینک: ${bankLabel}` : null,
 //         cheque_number ? `| چیک #: ${cheque_number}` : null,
-//         notes ? `| ${notes}` : null,  // ✅ ADD MANUAL NOTES HERE
+//         notes ? `| ${notes}` : null,
 //       ].filter(Boolean).join(' ');
 
 //       await createSimpleCashbookEntry({
@@ -1630,8 +1637,7 @@ exports.getDailySummary = async (req, res) => {
 //         entry_type: 'cash_in',
 //         source_type: 'customer_payment',
 //         reference_id: sale.id,
-//         // reference_number: sale.invoice_number,
-//         reference_number: sale.reference || sale.invoice_number, // ✅ Use reference if available, fallback to invoice_number
+//         reference_number: sale.reference || sale.invoice_number,
 //         description: descParts,
 //         amount: paymentAmount,
 //         created_by: req.user?.id,
@@ -1718,6 +1724,17 @@ exports.recordPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Sale is already fully paid' }); 
     }
 
+    // ✅ REMOVE the validation that blocks overpayments
+    // Instead, calculate how much to apply to this sale and how much is overpayment
+    const outstandingBalance = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
+    let amountToApply = paymentAmount;
+    let overpaymentAmount = 0;
+    
+    if (paymentAmount > outstandingBalance) {
+      amountToApply = outstandingBalance;
+      overpaymentAmount = paymentAmount - outstandingBalance;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 1: Validate bank for bank/cheque payments
     // ═══════════════════════════════════════════════════════════════════════
@@ -1747,16 +1764,20 @@ exports.recordPayment = async (req, res) => {
         });
       }
 
-      // Build cheque description
       let chequeDescription = notes 
         ? notes 
         : `${sale.customer?.name || 'کسٹمر'} کی جانب سے ${sale.reference} کی ادائیگی`;
+      
+      // Add overpayment note if applicable
+      if (overpaymentAmount > 0) {
+        chequeDescription += ` (اadd: زیادہ ادائیگی ${overpaymentAmount})`;
+      }
 
       const cheque = await Cheque.create({
         bank_id: bank_id,
         cheque_number: cheque_number,
         cheque_type: 'received',
-        amount: paymentAmount,
+        amount: paymentAmount, // Full amount (including overpayment)
         payee_payer_name: sale.customer?.name || 'Customer',
         description: chequeDescription,
         issue_date: payment_date ? new Date(payment_date) : new Date(),
@@ -1774,17 +1795,20 @@ exports.recordPayment = async (req, res) => {
     let bankTransaction = null;
     if (selectedBank && payment_method === 'bank') {
       const currentBalance = parseFloat(selectedBank.balance);
-      const newBalance = currentBalance + paymentAmount;
+      const newBalance = currentBalance + paymentAmount; // Full amount
 
       await selectedBank.update(
         { balance: newBalance.toFixed(2) },
         { transaction: t }
       );
 
-      // Build bank transaction description - ONLY here, not duplicated
       let bankDescription = notes 
         ? `${notes} - ${sale.customer?.name || 'کسٹمر'} کی جانب سے ادائیگی`
         : `${sale.customer?.name || 'کسٹمر'} کی جانب سے ادائیگی موصول`;
+      
+      if (overpaymentAmount > 0) {
+        bankDescription += ` (زیادہ ادائیگی: ${overpaymentAmount})`;
+      }
 
       bankTransaction = await BankTransaction.create({
         bank_id: bank_id,
@@ -1801,7 +1825,7 @@ exports.recordPayment = async (req, res) => {
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 4: Update sale payment info
     // ═══════════════════════════════════════════════════════════════════════
-    const newPaid = parseFloat(sale.amount_paid) + paymentAmount;
+    const newPaid = parseFloat(sale.amount_paid) + amountToApply; // Only apply up to outstanding
     const newStatus = newPaid >= parseFloat(sale.grand_total) ? 'paid' : 'partial';
 
     // Urdu translations for payment method labels
@@ -1815,7 +1839,7 @@ exports.recordPayment = async (req, res) => {
     
     const methodLabel = methodLabels[payment_method] || payment_method;
 
-    // Build payment notes for sale - SINGLE SOURCE OF TRUTH
+    // Build payment notes for sale
     let paymentNotes = '';
 
     if (payment_method === 'cheque' && cheque_number) {
@@ -1838,11 +1862,14 @@ exports.recordPayment = async (req, res) => {
         ? `${notes} | سلیپ ادائیگی، بینک: ${bankName}`
         : `سلیپ ادائیگی، بینک: ${bankName}`;
     } else {
-      // Default: just use notes if provided
       paymentNotes = notes || '';
     }
 
-    // Update sale with payment notes
+    // Add overpayment note
+    if (overpaymentAmount > 0) {
+      paymentNotes += ` (زیادہ ادائیگی: ${overpaymentAmount} - اضافی رقم واپس کی جائے گی)`;
+    }
+
     await sale.update({
       amount_paid: newPaid,
       payment_status: newStatus,
@@ -1867,8 +1894,12 @@ exports.recordPayment = async (req, res) => {
     // STEP 6: Create customer ledger entry
     // ═══════════════════════════════════════════════════════════════════════
     if (sale.customer_id) {
-      // Build ledger description - use paymentNotes without duplication
+      // Create ledger entry for the FULL amount (including overpayment)
       let ledgerDescription = paymentNotes || `ادائیگی موصول - ${sale.reference || sale.invoice_number} (${methodLabel})`;
+      
+      if (overpaymentAmount > 0) {
+        ledgerDescription += ` (زیادہ ادائیگی: ${overpaymentAmount} - کسٹمر کا کریڈٹ بیلنس)`;
+      }
 
       await createLedgerEntry({
         customerId: sale.customer_id,
@@ -1877,7 +1908,7 @@ exports.recordPayment = async (req, res) => {
         referenceId: sale.id,
         referenceNumber: sale.reference || sale.invoice_number,
         description: ledgerDescription,
-        debit: paymentAmount,
+        debit: paymentAmount, // Full payment amount
         credit: 0,
         transaction: t,
         paymentMethod: payment_method,
@@ -1886,6 +1917,26 @@ exports.recordPayment = async (req, res) => {
         chequeNumber: cheque_number || null,
         chequeDate: cheque_date ? new Date(cheque_date) : null,
       });
+
+      // If there's overpayment, create a separate credit note entry
+      if (overpaymentAmount > 0) {
+        await createLedgerEntry({
+          customerId: sale.customer_id,
+          date: payment_date || new Date(),
+          transactionType: 'credit_note',
+          referenceId: sale.id,
+          referenceNumber: sale.reference || sale.invoice_number,
+          description: `زیادہ ادائیگی کا کریڈٹ - ${overpaymentAmount} (سے ${sale.invoice_number})`,
+          debit: 0,
+          credit: overpaymentAmount, // Customer has credit balance
+          transaction: t,
+          paymentMethod: payment_method,
+          bankName: selectedBank?.name || bank_name || null,
+          bankId: bank_id || null,
+          chequeNumber: cheque_number || null,
+          chequeDate: cheque_date ? new Date(cheque_date) : null,
+        });
+      }
 
       const finalBalance = await getCustomerBalance(sale.customer_id, t);
       await Customer.update({ balance: finalBalance }, { where: { id: sale.customer_id }, transaction: t });
@@ -1903,14 +1954,14 @@ exports.recordPayment = async (req, res) => {
         source_type: 'customer_payment',
         reference_id: sale.id,
         reference_number: sale.reference || sale.invoice_number,
-        description: `کیش وصول - ${sale.customer?.name || 'کسٹمر'}`,
+        description: `کیش وصول - ${sale.customer?.name || 'کسٹمر'}${overpaymentAmount > 0 ? ` (زیادہ ادائیگی: ${overpaymentAmount})` : ''}`,
         amount: paymentAmount,
         created_by: req.user?.id,
         transaction: t,
       });
     }
 
-    // Simple cashbook — ALL methods with proper description
+    // Simple cashbook
     if (from_simple_cashbook) {
       const methodDescMap = {
         cash: 'نقد',
@@ -1921,12 +1972,12 @@ exports.recordPayment = async (req, res) => {
       const methodLabelSimple = methodDescMap[payment_method] || payment_method;
       const bankLabel = selectedBank?.name || bank_name;
 
-      // Build description parts - SINGLE SOURCE
       const descParts = [
         `ادائیگی وصول - ${sale.customer?.name || 'کسٹمر'}`,
         bankLabel ? `| بینک: ${bankLabel}` : null,
         cheque_number ? `| چیک #: ${cheque_number}` : null,
         notes ? `| ${notes}` : null,
+        overpaymentAmount > 0 ? `| زیادہ ادائیگی: ${overpaymentAmount}` : null,
       ].filter(Boolean).join(' ');
 
       await createSimpleCashbookEntry({
@@ -1952,7 +2003,10 @@ exports.recordPayment = async (req, res) => {
     // Success messages in Urdu
     // ═══════════════════════════════════════════════════════════════════════
     let successMessage = 'ادائیگی کامیابی سے ریکارڈ ہوگئی';
-    if (payment_method === 'cheque' && cheque_number) {
+    
+    if (overpaymentAmount > 0) {
+      successMessage = `ادائیگی ${paymentAmount} ریکارڈ ہوگئی۔ ${amountToApply} لاگو ہوا، ${overpaymentAmount} زیادہ ادائیگی کسٹمر کے کریڈٹ میں شامل ہے۔`;
+    } else if (payment_method === 'cheque' && cheque_number) {
       successMessage = `چیک #${cheque_number} ریکارڈ ہوگیا۔ حیثیت: زیر التواء (کلئرنگ کا انتظار)`;
     } else if (payment_method === 'bank' && selectedBank) {
       successMessage = `${selectedBank.name} میں بینک ٹرانسفر ریکارڈ ہوگیا۔ ${selectedBank.name} کا بیلنس Rs ${paymentAmount.toFixed(2)} بڑھ گیا`;
@@ -1968,7 +2022,9 @@ exports.recordPayment = async (req, res) => {
       data: {
         sale: updated,
         cheque_id: chequeId,
-        bank_transaction: bankTransaction
+        bank_transaction: bankTransaction,
+        overpayment: overpaymentAmount,
+        applied_amount: amountToApply
       }
     });
   } catch (error) {
@@ -1981,6 +2037,8 @@ exports.recordPayment = async (req, res) => {
     });
   }
 };
+
+
 
 exports.getCreditSalesSummary = async (req, res) => {
   try {
