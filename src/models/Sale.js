@@ -97,6 +97,12 @@ module.exports = (sequelize) => {
       type: DataTypes.TEXT,
       allowNull: true
     },
+    mazdoori_amount: {
+      type: DataTypes.DECIMAL(12, 2),
+      allowNull: true,
+      defaultValue: 0.00,
+      comment: 'Labor charges added to the sale'
+    },
     created_by: {
       type: DataTypes.INTEGER,
       allowNull: true,
