@@ -1421,6 +1421,17 @@ exports.getDailySummary = async (req, res) => {
 //       return res.status(400).json({ success: false, message: 'Sale is already fully paid' }); 
 //     }
 
+//     // ✅ REMOVE the validation that blocks overpayments
+//     // Instead, calculate how much to apply to this sale and how much is overpayment
+//     const outstandingBalance = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
+//     let amountToApply = paymentAmount;
+//     let overpaymentAmount = 0;
+    
+//     if (paymentAmount > outstandingBalance) {
+//       amountToApply = outstandingBalance;
+//       overpaymentAmount = paymentAmount - outstandingBalance;
+//     }
+
 //     // ═══════════════════════════════════════════════════════════════════════
 //     // STEP 1: Validate bank for bank/cheque payments
 //     // ═══════════════════════════════════════════════════════════════════════
@@ -1450,16 +1461,20 @@ exports.getDailySummary = async (req, res) => {
 //         });
 //       }
 
-//       // Build cheque description
 //       let chequeDescription = notes 
 //         ? notes 
 //         : `${sale.customer?.name || 'کسٹمر'} کی جانب سے ${sale.reference} کی ادائیگی`;
+      
+//       // Add overpayment note if applicable
+//       if (overpaymentAmount > 0) {
+//         chequeDescription += ` (اadd: زیادہ ادائیگی ${overpaymentAmount})`;
+//       }
 
 //       const cheque = await Cheque.create({
 //         bank_id: bank_id,
 //         cheque_number: cheque_number,
 //         cheque_type: 'received',
-//         amount: paymentAmount,
+//         amount: paymentAmount, // Full amount (including overpayment)
 //         payee_payer_name: sale.customer?.name || 'Customer',
 //         description: chequeDescription,
 //         issue_date: payment_date ? new Date(payment_date) : new Date(),
@@ -1477,17 +1492,20 @@ exports.getDailySummary = async (req, res) => {
 //     let bankTransaction = null;
 //     if (selectedBank && payment_method === 'bank') {
 //       const currentBalance = parseFloat(selectedBank.balance);
-//       const newBalance = currentBalance + paymentAmount;
+//       const newBalance = currentBalance + paymentAmount; // Full amount
 
 //       await selectedBank.update(
 //         { balance: newBalance.toFixed(2) },
 //         { transaction: t }
 //       );
 
-//       // Build bank transaction description - ONLY here, not duplicated
 //       let bankDescription = notes 
 //         ? `${notes} - ${sale.customer?.name || 'کسٹمر'} کی جانب سے ادائیگی`
 //         : `${sale.customer?.name || 'کسٹمر'} کی جانب سے ادائیگی موصول`;
+      
+//       if (overpaymentAmount > 0) {
+//         bankDescription += ` (زیادہ ادائیگی: ${overpaymentAmount})`;
+//       }
 
 //       bankTransaction = await BankTransaction.create({
 //         bank_id: bank_id,
@@ -1504,7 +1522,7 @@ exports.getDailySummary = async (req, res) => {
 //     // ═══════════════════════════════════════════════════════════════════════
 //     // STEP 4: Update sale payment info
 //     // ═══════════════════════════════════════════════════════════════════════
-//     const newPaid = parseFloat(sale.amount_paid) + paymentAmount;
+//     const newPaid = parseFloat(sale.amount_paid) + amountToApply; // Only apply up to outstanding
 //     const newStatus = newPaid >= parseFloat(sale.grand_total) ? 'paid' : 'partial';
 
 //     // Urdu translations for payment method labels
@@ -1518,7 +1536,7 @@ exports.getDailySummary = async (req, res) => {
     
 //     const methodLabel = methodLabels[payment_method] || payment_method;
 
-//     // Build payment notes for sale - SINGLE SOURCE OF TRUTH
+//     // Build payment notes for sale
 //     let paymentNotes = '';
 
 //     if (payment_method === 'cheque' && cheque_number) {
@@ -1541,11 +1559,14 @@ exports.getDailySummary = async (req, res) => {
 //         ? `${notes} | سلیپ ادائیگی، بینک: ${bankName}`
 //         : `سلیپ ادائیگی، بینک: ${bankName}`;
 //     } else {
-//       // Default: just use notes if provided
 //       paymentNotes = notes || '';
 //     }
 
-//     // Update sale with payment notes
+//     // Add overpayment note
+//     if (overpaymentAmount > 0) {
+//       paymentNotes += ` (زیادہ ادائیگی: ${overpaymentAmount} - اضافی رقم واپس کی جائے گی)`;
+//     }
+
 //     await sale.update({
 //       amount_paid: newPaid,
 //       payment_status: newStatus,
@@ -1570,8 +1591,12 @@ exports.getDailySummary = async (req, res) => {
 //     // STEP 6: Create customer ledger entry
 //     // ═══════════════════════════════════════════════════════════════════════
 //     if (sale.customer_id) {
-//       // Build ledger description - use paymentNotes without duplication
+//       // Create ledger entry for the FULL amount (including overpayment)
 //       let ledgerDescription = paymentNotes || `ادائیگی موصول - ${sale.reference || sale.invoice_number} (${methodLabel})`;
+      
+//       if (overpaymentAmount > 0) {
+//         ledgerDescription += ` (زیادہ ادائیگی: ${overpaymentAmount} - کسٹمر کا کریڈٹ بیلنس)`;
+//       }
 
 //       await createLedgerEntry({
 //         customerId: sale.customer_id,
@@ -1580,7 +1605,7 @@ exports.getDailySummary = async (req, res) => {
 //         referenceId: sale.id,
 //         referenceNumber: sale.reference || sale.invoice_number,
 //         description: ledgerDescription,
-//         debit: paymentAmount,
+//         debit: paymentAmount, // Full payment amount
 //         credit: 0,
 //         transaction: t,
 //         paymentMethod: payment_method,
@@ -1589,6 +1614,27 @@ exports.getDailySummary = async (req, res) => {
 //         chequeNumber: cheque_number || null,
 //         chequeDate: cheque_date ? new Date(cheque_date) : null,
 //       });
+
+//       // If there's overpayment, create a separate adjustment entry
+//       if (overpaymentAmount > 0) {
+//         await createLedgerEntry({
+//           customerId: sale.customer_id,
+//           date: payment_date || new Date(),
+//           // transactionType: 'credit_note',
+//           transactionType: 'adjustment',
+//           referenceId: sale.id,
+//           referenceNumber: sale.reference || sale.invoice_number,
+//           description: `زیادہ ادائیگی کا کریڈٹ - ${overpaymentAmount} (سے ${sale.invoice_number})`,
+//           debit: 0,
+//           credit: overpaymentAmount, // Customer has credit balance
+//           transaction: t,
+//           paymentMethod: payment_method,
+//           bankName: selectedBank?.name || bank_name || null,
+//           bankId: bank_id || null,
+//           chequeNumber: cheque_number || null,
+//           chequeDate: cheque_date ? new Date(cheque_date) : null,
+//         });
+//       }
 
 //       const finalBalance = await getCustomerBalance(sale.customer_id, t);
 //       await Customer.update({ balance: finalBalance }, { where: { id: sale.customer_id }, transaction: t });
@@ -1606,14 +1652,14 @@ exports.getDailySummary = async (req, res) => {
 //         source_type: 'customer_payment',
 //         reference_id: sale.id,
 //         reference_number: sale.reference || sale.invoice_number,
-//         description: `کیش وصول - ${sale.customer?.name || 'کسٹمر'}`,
+//         description: `کیش وصول - ${sale.customer?.name || 'کسٹمر'}${overpaymentAmount > 0 ? ` (زیادہ ادائیگی: ${overpaymentAmount})` : ''}`,
 //         amount: paymentAmount,
 //         created_by: req.user?.id,
 //         transaction: t,
 //       });
 //     }
 
-//     // Simple cashbook — ALL methods with proper description
+//     // Simple cashbook
 //     if (from_simple_cashbook) {
 //       const methodDescMap = {
 //         cash: 'نقد',
@@ -1624,12 +1670,12 @@ exports.getDailySummary = async (req, res) => {
 //       const methodLabelSimple = methodDescMap[payment_method] || payment_method;
 //       const bankLabel = selectedBank?.name || bank_name;
 
-//       // Build description parts - SINGLE SOURCE
 //       const descParts = [
 //         `ادائیگی وصول - ${sale.customer?.name || 'کسٹمر'}`,
 //         bankLabel ? `| بینک: ${bankLabel}` : null,
 //         cheque_number ? `| چیک #: ${cheque_number}` : null,
 //         notes ? `| ${notes}` : null,
+//         overpaymentAmount > 0 ? `| زیادہ ادائیگی: ${overpaymentAmount}` : null,
 //       ].filter(Boolean).join(' ');
 
 //       await createSimpleCashbookEntry({
@@ -1655,7 +1701,10 @@ exports.getDailySummary = async (req, res) => {
 //     // Success messages in Urdu
 //     // ═══════════════════════════════════════════════════════════════════════
 //     let successMessage = 'ادائیگی کامیابی سے ریکارڈ ہوگئی';
-//     if (payment_method === 'cheque' && cheque_number) {
+    
+//     if (overpaymentAmount > 0) {
+//       successMessage = `ادائیگی ${paymentAmount} ریکارڈ ہوگئی۔ ${amountToApply} لاگو ہوا، ${overpaymentAmount} زیادہ ادائیگی کسٹمر کے کریڈٹ میں شامل ہے۔`;
+//     } else if (payment_method === 'cheque' && cheque_number) {
 //       successMessage = `چیک #${cheque_number} ریکارڈ ہوگیا۔ حیثیت: زیر التواء (کلئرنگ کا انتظار)`;
 //     } else if (payment_method === 'bank' && selectedBank) {
 //       successMessage = `${selectedBank.name} میں بینک ٹرانسفر ریکارڈ ہوگیا۔ ${selectedBank.name} کا بیلنس Rs ${paymentAmount.toFixed(2)} بڑھ گیا`;
@@ -1671,7 +1720,9 @@ exports.getDailySummary = async (req, res) => {
 //       data: {
 //         sale: updated,
 //         cheque_id: chequeId,
-//         bank_transaction: bankTransaction
+//         bank_transaction: bankTransaction,
+//         overpayment: overpaymentAmount,
+//         applied_amount: amountToApply
 //       }
 //     });
 //   } catch (error) {
@@ -1724,8 +1775,7 @@ exports.recordPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Sale is already fully paid' }); 
     }
 
-    // ✅ REMOVE the validation that blocks overpayments
-    // Instead, calculate how much to apply to this sale and how much is overpayment
+    // Calculate outstanding and overpayment
     const outstandingBalance = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
     let amountToApply = paymentAmount;
     let overpaymentAmount = 0;
@@ -1768,16 +1818,15 @@ exports.recordPayment = async (req, res) => {
         ? notes 
         : `${sale.customer?.name || 'کسٹمر'} کی جانب سے ${sale.reference} کی ادائیگی`;
       
-      // Add overpayment note if applicable
       if (overpaymentAmount > 0) {
-        chequeDescription += ` (اadd: زیادہ ادائیگی ${overpaymentAmount})`;
+        chequeDescription += ` (زیادہ ادائیگی: ${overpaymentAmount})`;
       }
 
       const cheque = await Cheque.create({
         bank_id: bank_id,
         cheque_number: cheque_number,
         cheque_type: 'received',
-        amount: paymentAmount, // Full amount (including overpayment)
+        amount: paymentAmount,
         payee_payer_name: sale.customer?.name || 'Customer',
         description: chequeDescription,
         issue_date: payment_date ? new Date(payment_date) : new Date(),
@@ -1790,12 +1839,12 @@ exports.recordPayment = async (req, res) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 3: Record Bank Transaction (if bank payment - money comes IN)
+    // STEP 3: Record Bank Transaction (if bank payment)
     // ═══════════════════════════════════════════════════════════════════════
     let bankTransaction = null;
     if (selectedBank && payment_method === 'bank') {
       const currentBalance = parseFloat(selectedBank.balance);
-      const newBalance = currentBalance + paymentAmount; // Full amount
+      const newBalance = currentBalance + paymentAmount;
 
       await selectedBank.update(
         { balance: newBalance.toFixed(2) },
@@ -1825,7 +1874,11 @@ exports.recordPayment = async (req, res) => {
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 4: Update sale payment info
     // ═══════════════════════════════════════════════════════════════════════
-    const newPaid = parseFloat(sale.amount_paid) + amountToApply; // Only apply up to outstanding
+    // Only apply up to outstanding amount, cap at grand total
+    const newPaid = Math.min(
+      parseFloat(sale.amount_paid) + paymentAmount,
+      parseFloat(sale.grand_total)
+    );
     const newStatus = newPaid >= parseFloat(sale.grand_total) ? 'paid' : 'partial';
 
     // Urdu translations for payment method labels
@@ -1865,9 +1918,9 @@ exports.recordPayment = async (req, res) => {
       paymentNotes = notes || '';
     }
 
-    // Add overpayment note
+    // Add overpayment note - just for information, no adjustment entry
     if (overpaymentAmount > 0) {
-      paymentNotes += ` (زیادہ ادائیگی: ${overpaymentAmount} - اضافی رقم واپس کی جائے گی)`;
+      paymentNotes += ` (زیادہ ادائیگی: ${overpaymentAmount})`;
     }
 
     await sale.update({
@@ -1891,16 +1944,16 @@ exports.recordPayment = async (req, res) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 6: Create customer ledger entry
+    // STEP 6: Create customer ledger entry for FULL payment amount
     // ═══════════════════════════════════════════════════════════════════════
     if (sale.customer_id) {
-      // Create ledger entry for the FULL amount (including overpayment)
       let ledgerDescription = paymentNotes || `ادائیگی موصول - ${sale.reference || sale.invoice_number} (${methodLabel})`;
       
       if (overpaymentAmount > 0) {
-        ledgerDescription += ` (زیادہ ادائیگی: ${overpaymentAmount} - کسٹمر کا کریڈٹ بیلنس)`;
+        ledgerDescription += ` (زیادہ ادائیگی: ${overpaymentAmount})`;
       }
 
+      // Create single ledger entry for the FULL payment amount
       await createLedgerEntry({
         customerId: sale.customer_id,
         date: payment_date || new Date(),
@@ -1918,25 +1971,7 @@ exports.recordPayment = async (req, res) => {
         chequeDate: cheque_date ? new Date(cheque_date) : null,
       });
 
-      // If there's overpayment, create a separate credit note entry
-      if (overpaymentAmount > 0) {
-        await createLedgerEntry({
-          customerId: sale.customer_id,
-          date: payment_date || new Date(),
-          transactionType: 'credit_note',
-          referenceId: sale.id,
-          referenceNumber: sale.reference || sale.invoice_number,
-          description: `زیادہ ادائیگی کا کریڈٹ - ${overpaymentAmount} (سے ${sale.invoice_number})`,
-          debit: 0,
-          credit: overpaymentAmount, // Customer has credit balance
-          transaction: t,
-          paymentMethod: payment_method,
-          bankName: selectedBank?.name || bank_name || null,
-          bankId: bank_id || null,
-          chequeNumber: cheque_number || null,
-          chequeDate: cheque_date ? new Date(cheque_date) : null,
-        });
-      }
+      // ✅ NO adjustment entry for overpayment - just save the full payment
 
       const finalBalance = await getCustomerBalance(sale.customer_id, t);
       await Customer.update({ balance: finalBalance }, { where: { id: sale.customer_id }, transaction: t });
@@ -1999,13 +2034,11 @@ exports.recordPayment = async (req, res) => {
       include: [{ model: Customer, as: 'customer', attributes: ['id', 'name', 'balance'] }],
     });
 
-    // ═══════════════════════════════════════════════════════════════════════
     // Success messages in Urdu
-    // ═══════════════════════════════════════════════════════════════════════
     let successMessage = 'ادائیگی کامیابی سے ریکارڈ ہوگئی';
     
     if (overpaymentAmount > 0) {
-      successMessage = `ادائیگی ${paymentAmount} ریکارڈ ہوگئی۔ ${amountToApply} لاگو ہوا، ${overpaymentAmount} زیادہ ادائیگی کسٹمر کے کریڈٹ میں شامل ہے۔`;
+      successMessage = `ادائیگی ${paymentAmount} ریکارڈ ہوگئی۔ (${amountToApply} لاگو ہوا، ${overpaymentAmount} زیادہ ادائیگی)`;
     } else if (payment_method === 'cheque' && cheque_number) {
       successMessage = `چیک #${cheque_number} ریکارڈ ہوگیا۔ حیثیت: زیر التواء (کلئرنگ کا انتظار)`;
     } else if (payment_method === 'bank' && selectedBank) {
@@ -2024,7 +2057,7 @@ exports.recordPayment = async (req, res) => {
         cheque_id: chequeId,
         bank_transaction: bankTransaction,
         overpayment: overpaymentAmount,
-        applied_amount: amountToApply
+        applied_amount: Math.min(paymentAmount, outstandingBalance)
       }
     });
   } catch (error) {
@@ -2037,8 +2070,6 @@ exports.recordPayment = async (req, res) => {
     });
   }
 };
-
-
 
 exports.getCreditSalesSummary = async (req, res) => {
   try {
