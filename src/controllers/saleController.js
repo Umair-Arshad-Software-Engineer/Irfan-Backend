@@ -511,159 +511,79 @@ exports.createSale = async (req, res) => {
     let subtotal = 0;
     const itemSnapshots = [];
 
-    // for (const item of items) {
-    //   if (!item.product_id) {
-    //     await t.rollback();
-    //     return res.status(400).json({ success: false, message: 'Each item must have a product_id' });
-    //   }
+    for (const item of items) {
+      if (!item.product_id) {
+        await t.rollback();
+        return res.status(400).json({ success: false, message: 'Each item must have a product_id' });
+      }
 
-    //   const product = await Product.findByPk(item.product_id, { transaction: t });
-    //   if (!product) {
-    //     await t.rollback();
-    //     return res.status(404).json({ success: false, message: `Product id ${item.product_id} not found` });
-    //   }
+      const product = await Product.findByPk(item.product_id, { transaction: t });
+      if (!product) {
+        await t.rollback();
+        return res.status(404).json({ success: false, message: `Product id ${item.product_id} not found` });
+      }
 
-    //   let quantity = 0;
-    //   let weight = null;
-    //   let totalPrice = 0;
-    //   const unitPrice = parseFloat(item.unit_price ?? product.sale_price);
+      let quantity = 0;
+      let weight = null;
+      let totalPrice = 0;
+      const unitPrice = parseFloat(item.unit_price ?? product.sale_price);
 
-    //   if (isSarya) {
-    //     // SARYA mode: weight is required, quantity is ALWAYS 0
-    //     weight = item.weight != null ? parseFloat(item.weight) : null;
-    //     if (!weight || weight <= 0) {
-    //       await t.rollback();
-    //       return res.status(400).json({
-    //         success: false,
-    //         message: `SARYA mode requires a valid weight > 0 for each item (product_id: ${item.product_id})`,
-    //       });
-    //     }
-    //     quantity = 0; // ✅ CRITICAL: Set quantity to 0 for weight-based items
-    //     totalPrice = weight * unitPrice;
-    //     console.log(`SARYA item: product=${product.item_name}, weight=${weight}kg, price=${unitPrice}/kg, total=${totalPrice}, quantity=0`);
-    //   } else {
-    //     // FILLED mode: quantity is required
-    //     quantity = item.quantity ? parseInt(item.quantity) : 0;
-    //     if (!quantity || quantity < 1) {
-    //       await t.rollback();
-    //       return res.status(400).json({
-    //         success: false,
-    //         message: `Each item must have quantity >= 1 (product_id: ${item.product_id})`,
-    //       });
-    //     }
-    //     totalPrice = unitPrice * quantity;
-        
-    //     // Stock check only for FILLED mode
-    //     if (product.available_qty < quantity) {
-    //       await t.rollback();
-    //       return res.status(400).json({
-    //         success: false,
-    //         message: `Insufficient stock for "${product.item_name}". Available: ${product.available_qty}`,
-    //       });
-    //     }
-        
-    //     console.log(`FILLED item: product=${product.item_name}, quantity=${quantity}, price=${unitPrice}, total=${totalPrice}`);
-    //   }
+      if (isSarya) {
+        weight = item.weight != null ? parseFloat(item.weight) : null;
+        if (!weight || weight <= 0) {
+          await t.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `SARYA mode requires a valid weight > 0 for each item (product_id: ${item.product_id})`,
+          });
+        }
+        quantity = 0;
+        totalPrice = weight * unitPrice;
+      } else {
+        quantity = item.quantity ? parseInt(item.quantity) : 0;
+        if (!quantity || quantity < 1) {
+          await t.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Each item must have quantity >= 1 (product_id: ${item.product_id})`,
+          });
+        }
+        totalPrice = unitPrice * quantity;
 
-    //   subtotal += totalPrice;
+        if (product.available_qty < quantity) {
+          await t.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient stock for "${product.item_name}". Available: ${product.available_qty}`,
+          });
+        }
+      }
 
-    //   const { selectedLengths, lengthQuantities, selectedLengthsDisplay, totalPieces } = parseLengthFields(item);
+      subtotal += totalPrice;
 
-    //   itemSnapshots.push({
-    //     product_id: product.id,
-    //     product_name: product.item_name,
-    //     barcode: product.barcode,
-    //     unit_price: unitPrice,
-    //     quantity: quantity, // Will be 0 for SARYA, >0 for FILLED
-    //     total_price: totalPrice,
-    //     selected_lengths: selectedLengths,
-    //     length_quantities: lengthQuantities,
-    //     selected_lengths_display: selectedLengthsDisplay,
-    //     total_pieces: totalPieces,
-    //     weight: weight,
-    //     used_customer_price: item.used_customer_price === true,
-    //     _available_qty: product.available_qty,
-    //     _isSarya: isSarya,
-    //   });
-    // }
-    // In backend/src/controllers/saleController.js
-// Update the item snapshots creation
+      const { selectedLengths, lengthQuantities, selectedLengthsDisplay, totalPieces } = parseLengthFields(item);
 
-// Inside createSale function, update the itemSnapshots.push section:
+      // ✅ DESCRIPTION FIELD
+      const description = item.description?.trim() || null;
 
-for (const item of items) {
-  if (!item.product_id) {
-    await t.rollback();
-    return res.status(400).json({ success: false, message: 'Each item must have a product_id' });
-  }
-
-  const product = await Product.findByPk(item.product_id, { transaction: t });
-  if (!product) {
-    await t.rollback();
-    return res.status(404).json({ success: false, message: `Product id ${item.product_id} not found` });
-  }
-
-  let quantity = 0;
-  let weight = null;
-  let totalPrice = 0;
-  const unitPrice = parseFloat(item.unit_price ?? product.sale_price);
-
-  if (isSarya) {
-    weight = item.weight != null ? parseFloat(item.weight) : null;
-    if (!weight || weight <= 0) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: `SARYA mode requires a valid weight > 0 for each item (product_id: ${item.product_id})`,
+      itemSnapshots.push({
+        product_id: product.id,
+        product_name: product.item_name,
+        description: description,
+        barcode: product.barcode,
+        unit_price: unitPrice,
+        quantity: quantity,
+        total_price: totalPrice,
+        selected_lengths: selectedLengths,
+        length_quantities: lengthQuantities,
+        selected_lengths_display: selectedLengthsDisplay,
+        total_pieces: totalPieces,
+        weight: weight,
+        used_customer_price: item.used_customer_price === true,
+        _available_qty: product.available_qty,
+        _isSarya: isSarya,
       });
     }
-    quantity = 0;
-    totalPrice = weight * unitPrice;
-  } else {
-    quantity = item.quantity ? parseInt(item.quantity) : 0;
-    if (!quantity || quantity < 1) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: `Each item must have quantity >= 1 (product_id: ${item.product_id})`,
-      });
-    }
-    totalPrice = unitPrice * quantity;
-    
-    if (product.available_qty < quantity) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: `Insufficient stock for "${product.item_name}". Available: ${product.available_qty}`,
-      });
-    }
-  }
-
-  subtotal += totalPrice;
-
-  const { selectedLengths, lengthQuantities, selectedLengthsDisplay, totalPieces } = parseLengthFields(item);
-
-  // ✅ ADD DESCRIPTION FIELD
-  const description = item.description?.trim() || null;
-
-  itemSnapshots.push({
-    product_id: product.id,
-    product_name: product.item_name,
-    description: description,  // ✅ ADD THIS
-    barcode: product.barcode,
-    unit_price: unitPrice,
-    quantity: quantity,
-    total_price: totalPrice,
-    selected_lengths: selectedLengths,
-    length_quantities: lengthQuantities,
-    selected_lengths_display: selectedLengthsDisplay,
-    total_pieces: totalPieces,
-    weight: weight,
-    used_customer_price: item.used_customer_price === true,
-    _available_qty: product.available_qty,
-    _isSarya: isSarya,
-  });
-}
 
     let discountAmount = 0;
     const discountVal = parseFloat(discount_value) || 0;
@@ -674,7 +594,12 @@ for (const item of items) {
       discountAmount = discountVal;
     }
     discountAmount = Math.min(discountAmount, subtotal);
-    const grandTotal = subtotal - discountAmount;
+
+    // ✅ FIX: mazdooriAmount ab grandTotal se PEHLE nikalte hain,
+    // taake grandTotal (jo ledger, paid, changeAmount sab jagah use hota hai)
+    // hamesha mazdoori included ho — koi mismatch na ho.
+    const mazdooriAmount = parseFloat(req.body.mazdoori_amount) || 0;
+    const grandTotal = subtotal - discountAmount + mazdooriAmount; // ✅ mazdoori yahin add
 
     const isCredit = payment_method === 'credit';
     const paid = isCredit ? 0 : (parseFloat(amount_paid) || (sale_type === 'pos' ? grandTotal : 0));
@@ -692,8 +617,6 @@ for (const item of items) {
     }
 
     const invoiceNumber = await generateInvoiceNumber(sale_type);
-    const mazdooriAmount = parseFloat(req.body.mazdoori_amount) || 0;
-
 
     let finalNotes = notes || '';
     if (isCredit && credit_details) {
@@ -721,9 +644,8 @@ for (const item of items) {
         discount_value: discountVal,
         discount_amount: discountAmount,
         tax_amount: 0,
-        // grand_total: grandTotal,
-        mazdoori_amount: mazdooriAmount,  // ✅ ADD THIS
-        grand_total: grandTotal + mazdooriAmount,  // ✅ ADD MAZDOORI TO GRAND TOTAL
+        mazdoori_amount: mazdooriAmount,
+        grand_total: grandTotal, // ✅ ab yahan sirf ek jagah se aa raha hai, double-add nahi
         amount_paid: paid,
         change_amount: changeAmount,
         payment_method,
@@ -751,6 +673,8 @@ for (const item of items) {
     }
 
     if (customer_id) {
+      // ✅ ab grandTotal mein mazdoori pehle se shamil hai, is liye
+      // ledger ka credit amount automatically sahi (mazdoori included) hoga
       const saleAmount = isCredit ? grandTotal : (grandTotal - paid);
 
       if (saleAmount > 0) {
@@ -759,7 +683,7 @@ for (const item of items) {
           date: sale_date || new Date(),
           transactionType: 'sale',
           referenceId: sale.id,
-          referenceNumber: reference || invoiceNumber, // ✅ Use reference if provided, else invoice number
+          referenceNumber: reference || invoiceNumber,
           description: `Sale ${invoiceNumber} - ${sale_type === 'invoice' ? 'Invoice' : 'POS'}${isCredit ? ' (Credit)' : ''}${isSarya ? ' [SARYA]' : ''}`,
           debit: 0,
           credit: saleAmount,
@@ -773,7 +697,7 @@ for (const item of items) {
           date: sale_date || new Date(),
           transactionType: 'payment',
           referenceId: sale.id,
-          referenceNumber: reference || invoiceNumber, // ✅ Use reference if provided, else invoice number
+          referenceNumber: reference || invoiceNumber,
           description: `Payment received for ${invoiceNumber} (${payment_method})`,
           debit: paid,
           credit: 0,
@@ -803,11 +727,13 @@ for (const item of items) {
       ],
     });
 
-    console.log('Sale created successfully:', { 
-      invoiceNumber, 
+    console.log('Sale created successfully:', {
+      invoiceNumber,
       itemsCount: saleItems.length,
       saryaItems: saleItems.filter(i => i.weight > 0 && i.quantity === 0).length,
-      filledItems: saleItems.filter(i => i.quantity > 0).length
+      filledItems: saleItems.filter(i => i.quantity > 0).length,
+      mazdooriAmount,
+      grandTotal,
     });
 
     const message = isCredit
@@ -874,37 +800,39 @@ exports.updateSale = async (req, res) => {
     const newCustomerId = customer_id !== undefined ? customer_id : sale.customer_id;
 
     // ─────────────────────────────────────────────
-    //  STEP 1: Reverse old ledger entries for this sale
+    //  STEP 1: Remove old ledger entries for this sale
+    //  ✅ FIX: instead of inserting an "adjustment" row that reverses the old
+    //  sale/payment entries (which left both the old rows AND a reversal row
+    //  visible in the ledger), we now DELETE the old sale/payment rows
+    //  outright and recalculate the running balance. This keeps the ledger
+    //  showing a single clean sale entry + payment entry per sale, exactly
+    //  like a freshly created sale — no extra adjustment noise.
     // ─────────────────────────────────────────────
     if (oldCustomerId) {
-      // Find all existing ledger entries for this sale
-      const oldLedgerEntries = await CustomerLedger.findAll({
+      await CustomerLedger.destroy({
         where: {
+          customer_id: oldCustomerId,
           reference_id: sale.id,
           transaction_type: { [Op.in]: ['sale', 'payment'] },
         },
         transaction: t,
       });
 
-      for (const entry of oldLedgerEntries) {
-        // Reverse each entry: swap debit/credit
-        await createLedgerEntry({
-          customerId: oldCustomerId,
-          date: sale_date || sale.sale_date,
-          transactionType: 'adjustment',
-          referenceId: sale.id,
-          referenceNumber: sale.invoice_number,
-          description: `EDIT: Reverse ${entry.transaction_type} for ${sale.invoice_number}`,
-          debit: parseFloat(entry.credit),   // swap
-          credit: parseFloat(entry.debit),   // swap
-          transaction: t,
-        });
+      // Recalculate old customer's balance from whatever ledger rows remain
+      const oldRemainingEntries = await CustomerLedger.findAll({
+        where: { customer_id: oldCustomerId },
+        order: [['date', 'ASC'], ['id', 'ASC']],
+        transaction: t,
+      });
+
+      let oldRunningBalance = 0;
+      for (const entry of oldRemainingEntries) {
+        oldRunningBalance += parseFloat(entry.credit) - parseFloat(entry.debit);
+        await entry.update({ balance: oldRunningBalance.toFixed(2) }, { transaction: t });
       }
 
-      // Update old customer balance
-      const oldFinalBalance = await getCustomerBalance(oldCustomerId, t);
       await Customer.update(
-        { balance: oldFinalBalance },
+        { balance: oldRunningBalance.toFixed(2) },
         { where: { id: oldCustomerId }, transaction: t }
       );
     }
@@ -997,14 +925,13 @@ exports.updateSale = async (req, res) => {
           totalPieces,
         } = parseLengthFields(item);
 
-          const description = item.description?.trim() || null;
-
+        const description = item.description?.trim() || null;
 
         newSnapshots.push({
           sale_id: parseInt(id),
           product_id: product.id,
           product_name: product.item_name,
-          description: description,  // ✅ ADD THIS
+          description: description,
           barcode: product.barcode,
           unit_price: unitPrice,
           quantity,
@@ -1047,12 +974,12 @@ exports.updateSale = async (req, res) => {
       discountAmount = newDiscountValue;
     }
     discountAmount = Math.min(discountAmount, subtotal);
-    // const grandTotal = subtotal - discountAmount;
-    const mazdooriAmount = req.body.mazdoori_amount != null 
-      ? parseFloat(req.body.mazdoori_amount) 
+
+    const mazdooriAmount = req.body.mazdoori_amount != null
+      ? parseFloat(req.body.mazdoori_amount)
       : parseFloat(sale.mazdoori_amount || 0);
 
-    const grandTotal = subtotal - discountAmount + mazdooriAmount;
+    const grandTotal = subtotal - discountAmount + mazdooriAmount; // mazdoori included
 
     const newAmountPaid = amount_paid != null
       ? parseFloat(amount_paid)
@@ -1081,7 +1008,7 @@ exports.updateSale = async (req, res) => {
         discount_type: newDiscountType,
         discount_value: newDiscountValue,
         discount_amount: discountAmount,
-        mazdoori_amount: mazdooriAmount,  // ✅ ADD THIS
+        mazdoori_amount: mazdooriAmount,
         grand_total: grandTotal,
         amount_paid: newAmountPaid,
         change_amount: Math.max(newAmountPaid - grandTotal, 0),
@@ -1095,6 +1022,8 @@ exports.updateSale = async (req, res) => {
 
     // ─────────────────────────────────────────────
     //  STEP 5: Create fresh ledger entries for new customer
+    //  ✅ These are now the ONLY ledger rows for this sale — clean replacement,
+    //  no adjustment/reversal rows left behind from Step 1.
     // ─────────────────────────────────────────────
     if (newCustomerId) {
       const unpaidAmount = isCredit ? grandTotal : (grandTotal - newAmountPaid);
@@ -1107,8 +1036,8 @@ exports.updateSale = async (req, res) => {
           date: sale_date || sale.sale_date,
           transactionType: 'sale',
           referenceId: sale.id,
-          referenceNumber: sale.invoice_number,
-          description: `Sale ${sale.invoice_number} (EDITED) - ${sale.sale_type === 'invoice' ? 'Invoice' : 'POS'}${isCredit ? ' (Credit)' : ''}${isSarya ? ' [SARYA]' : ''}`,
+          referenceNumber: sale.reference || sale.invoice_number,
+          description: `Sale ${sale.invoice_number} - ${sale.sale_type === 'invoice' ? 'Invoice' : 'POS'}${isCredit ? ' (Credit)' : ''}${isSarya ? ' [SARYA]' : ''}`,
           debit: 0,
           credit: saleAmountForLedger,
           transaction: t,
@@ -1122,8 +1051,8 @@ exports.updateSale = async (req, res) => {
           date: sale_date || sale.sale_date,
           transactionType: 'payment',
           referenceId: sale.id,
-          referenceNumber: sale.invoice_number,
-          description: `Payment for ${sale.invoice_number} (EDITED) (${payment_method})`,
+          referenceNumber: sale.reference || sale.invoice_number,
+          description: `Payment for ${sale.invoice_number} (${payment_method})`,
           debit: newAmountPaid,
           credit: 0,
           transaction: t,
@@ -1180,20 +1109,21 @@ exports.deleteSale = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const sale = await Sale.findByPk(id, { 
+    const sale = await Sale.findByPk(id, {
       include: [
         { model: SaleItem, as: 'items' },
         { model: Customer, as: 'customer' }
-      ] 
+      ],
+      transaction: t, // ✅ FIX: this findByPk was missing the transaction before
     });
-    
+
     if (!sale) {
       await t.rollback();
       return res.status(404).json({ success: false, message: 'Sale not found' });
     }
 
     const isSarya = sale.sale_category === 'sarya';
-    
+
     // Restore stock for FILLED mode only
     if (!isSarya) {
       for (const item of sale.items) {
@@ -1204,49 +1134,60 @@ exports.deleteSale = async (req, res) => {
       }
     }
 
-    // Handle customer ledger entries - DELETE them instead of reversing
+    // ─────────────────────────────────────────────
+    //  Handle customer ledger entries — DELETE all entries tied to this sale
+    // ─────────────────────────────────────────────
     if (sale.customer_id) {
-      // Find all existing ledger entries for this sale
+      // ✅ FIX: match by reference_id ONLY. reference_number is unreliable here —
+      // it can be the user-provided `reference`, the invoice_number, or (for
+      // reversal/adjustment entries created during an edit) may not match the
+      // invoice_number at all. reference_id is always sale.id, so it is the
+      // only safe way to find every ledger row that belongs to this sale
+      // (sale entry, payment entries, and any adjustment/reversal entries
+      // created by a prior edit).
       const ledgerEntries = await CustomerLedger.findAll({
         where: {
+          customer_id: sale.customer_id,
           reference_id: sale.id,
-          reference_number: sale.invoice_number,
         },
         transaction: t,
       });
 
-      // Delete all ledger entries for this sale
       if (ledgerEntries.length > 0) {
         await CustomerLedger.destroy({
           where: {
+            customer_id: sale.customer_id,
             reference_id: sale.id,
-            reference_number: sale.invoice_number,
           },
           transaction: t,
         });
       }
 
       // Recalculate customer balance from remaining ledger entries
+      // (must be ordered by date/id the same way createLedgerEntry expects,
+      // so the running balance stays consistent)
       const remainingEntries = await CustomerLedger.findAll({
         where: { customer_id: sale.customer_id },
-        order: [['id', 'ASC']],
+        order: [['date', 'ASC'], ['id', 'ASC']],
         transaction: t,
       });
 
       let newBalance = 0;
       for (const entry of remainingEntries) {
         newBalance = newBalance + parseFloat(entry.credit) - parseFloat(entry.debit);
-        await entry.update({ balance: newBalance }, { transaction: t });
+        await entry.update({ balance: newBalance.toFixed(2) }, { transaction: t });
       }
 
       // Update customer with new balance
       await Customer.update(
-        { balance: newBalance },
+        { balance: newBalance.toFixed(2) },
         { where: { id: sale.customer_id }, transaction: t }
       );
     }
 
-    // Delete cashbook entries instead of reversing
+    // ─────────────────────────────────────────────
+    //  Delete cashbook entries tied to this sale
+    // ─────────────────────────────────────────────
     const cashbookEntries = await SimpleCashbook.findAll({
       where: {
         source_type: 'customer_payment',
@@ -1265,7 +1206,9 @@ exports.deleteSale = async (req, res) => {
       });
     }
 
-    // Delete cheque records if any
+    // ─────────────────────────────────────────────
+    //  Delete cheque records tied to this sale
+    // ─────────────────────────────────────────────
     const chequeEntries = await Cheque.findAll({
       where: {
         sale_id: sale.id,
@@ -1282,11 +1225,21 @@ exports.deleteSale = async (req, res) => {
       });
     }
 
-    // Delete bank transactions if any
+    // ─────────────────────────────────────────────
+    //  Delete bank transactions tied to this sale
+    //  (kept matching on invoice_number since bank transactions for a sale's
+    //  direct payment recording use sale.reference || sale.invoice_number —
+    //  matching both keeps old data compatible)
+    // ─────────────────────────────────────────────
+    const bankTxWhere = {
+      [Op.or]: [
+        { reference_number: sale.invoice_number },
+        ...(sale.reference ? [{ reference_number: sale.reference }] : []),
+      ],
+    };
+
     const bankTransactions = await BankTransaction.findAll({
-      where: {
-        reference_number: sale.invoice_number,
-      },
+      where: bankTxWhere,
       transaction: t,
     });
 
@@ -1298,15 +1251,13 @@ exports.deleteSale = async (req, res) => {
           const bank = await Bank.findByPk(bankTx.bank_id, { transaction: t });
           if (bank) {
             const newBankBalance = parseFloat(bank.balance) - parseFloat(bankTx.amount);
-            await bank.update({ balance: newBankBalance }, { transaction: t });
+            await bank.update({ balance: newBankBalance.toFixed(2) }, { transaction: t });
           }
         }
       }
-      
+
       await BankTransaction.destroy({
-        where: {
-          reference_number: sale.invoice_number,
-        },
+        where: bankTxWhere,
         transaction: t,
       });
     }
@@ -1314,12 +1265,12 @@ exports.deleteSale = async (req, res) => {
     // Delete sale items and sale
     await SaleItem.destroy({ where: { sale_id: id }, transaction: t });
     await sale.destroy({ transaction: t });
-    
+
     await t.commit();
 
-    res.json({ 
-      success: true, 
-      message: 'Sale voided successfully with all related records deleted' 
+    res.json({
+      success: true,
+      message: 'Sale voided successfully with all related records deleted'
     });
   } catch (error) {
     await t.rollback();
