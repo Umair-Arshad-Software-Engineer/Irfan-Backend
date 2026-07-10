@@ -2180,10 +2180,10 @@ exports.recordPayment = async (req, res) => {
     if (payment_method === 'cheque' && cheque_number) {
       const bankName = selectedBank?.name || bank_name || 'N/A';
       const dateStr = cheque_date ? new Date(cheque_date).toISOString().split('T')[0] : 'N/A';
-      paymentNotes = `${notes ? notes + ' | ' : ''}${customerName}، چیک #${cheque_number}، بینک: ${bankName}، تاریخ: ${dateStr}`;
+      paymentNotes = `${notes ? notes + ' | ' : ''}${customerName}،چیک نمبر #${cheque_number}،${bankName}،تاریخ: ${dateStr}`;
     } else if (payment_method === 'bank') {
       const bankName = selectedBank?.name || bank_name || 'N/A';
-      paymentNotes = `${notes ? notes + ' | ' : ''}${customerName}، بینک: ${bankName}`;
+      paymentNotes = `${notes ? notes + ' | ' : ''}${customerName}،  ${bankName}`;
     } else if (payment_method === 'cash') {
       paymentNotes = `${notes ? notes + ' | ' : ''}${customerName}`;
     } else if (payment_method === 'slip') {
