@@ -330,6 +330,39 @@ exports.addAdjustment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
+    // ✅ FIX: Normalize the incoming date.
+    // - If `date` is a plain "YYYY-MM-DD" string (no time component), JS's
+    //   Date constructor parses it as UTC midnight, which can shift it to
+    //   the previous calendar day in local time — pushing the entry out of
+    //   its intended chronological slot.
+    // - If `date` already includes a time (e.g. sent by the Flutter client
+    //   combining the picked date with the current time-of-day), we use it
+    //   as-is so same-day adjustments sort correctly among sales/payments.
+    // - If no date is sent at all, fall back to "now".
+    let transactionDate;
+    if (date) {
+      const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(date).trim());
+      if (isDateOnly) {
+        const [year, month, day] = date.split('-').map(Number);
+        const now = new Date();
+        // Use the given calendar date but the CURRENT time-of-day so it
+        // sorts after existing same-day entries rather than at midnight.
+        transactionDate = new Date(
+          year,
+          month - 1,
+          day,
+          now.getHours(),
+          now.getMinutes(),
+          now.getSeconds(),
+          now.getMilliseconds()
+        );
+      } else {
+        transactionDate = new Date(date);
+      }
+    } else {
+      transactionDate = new Date();
+    }
+
     // Determine transaction type
     let transactionType = 'adjustment';
     if (payment_method) {
@@ -344,7 +377,7 @@ exports.addAdjustment = async (req, res) => {
       debit: parseFloat(debit),
       credit: parseFloat(credit),
       description,
-      transaction_date: date || new Date(),
+      transaction_date: transactionDate, // ✅ normalized date
       created_by: req.user?.id,
       payment_method,
       bank_name,
