@@ -6,6 +6,7 @@ const ctrl = require('../controllers/dailyExpenseController');
 router.get('/', ctrl.getSessions);
 router.get('/today', ctrl.getTodaySession);
 router.get('/bills', ctrl.getBillPayments);  // ← before /:id
+router.get('/by-date', ctrl.getSessionByDate);   // ← ADD THIS, before /:id
 
 router.get('/:id', ctrl.getSession);
 router.post('/', ctrl.createSession);

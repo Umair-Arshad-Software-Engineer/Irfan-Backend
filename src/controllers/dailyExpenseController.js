@@ -28,7 +28,7 @@ async function recalculateSession(sessionId, dbTransaction) {
       where: { session_id: sessionId, entry_type: 'supplier_payment' },
       transaction: dbTransaction,
     }),
-    DailyExpense.sum('amount', {          // ← ADD THIS
+    DailyExpense.sum('amount', {
       where: { session_id: sessionId, entry_type: 'bill_payment' },
       transaction: dbTransaction,
     }),
@@ -36,7 +36,7 @@ async function recalculateSession(sessionId, dbTransaction) {
 
   const totalExpenses = parseFloat(expenseSum || 0);
   const totalSupplierPayments = parseFloat(supplierSum || 0);
-  const totalBillPayments = parseFloat(billSum || 0);   // ← ADD THIS
+  const totalBillPayments = parseFloat(billSum || 0);
 
   const session = await DailyExpenseSession.findByPk(sessionId, {
     transaction: dbTransaction,
@@ -44,12 +44,13 @@ async function recalculateSession(sessionId, dbTransaction) {
 
   const openingBalance = parseFloat(session.opening_balance);
   const closingBalance =
-    openingBalance - totalExpenses - totalSupplierPayments - totalBillPayments; // ← ADD THIS
+    openingBalance - totalExpenses - totalSupplierPayments - totalBillPayments;
 
   await session.update(
     {
       total_expenses: totalExpenses.toFixed(2),
       total_supplier_payments: totalSupplierPayments.toFixed(2),
+      total_bill_payments: totalBillPayments.toFixed(2),
       closing_balance: closingBalance.toFixed(2),
     },
     { transaction: dbTransaction }
@@ -82,10 +83,26 @@ exports.getSessions = async (req, res) => {
       offset,
     });
 
+    // Format sessions to include all fields
+    const formattedSessions = rows.map(session => ({
+      id: session.id,
+      session_date: session.session_date,
+      opening_balance: parseFloat(session.opening_balance),
+      total_expenses: parseFloat(session.total_expenses),
+      total_supplier_payments: parseFloat(session.total_supplier_payments),
+      total_bill_payments: parseFloat(session.total_bill_payments || 0),
+      closing_balance: parseFloat(session.closing_balance),
+      notes: session.notes,
+      is_closed: session.is_closed,
+      closed_at: session.closed_at,
+      created_at: session.created_at,
+      updated_at: session.updated_at,
+    }));
+
     return res.json({
       success: true,
       data: {
-        sessions: rows,
+        sessions: formattedSessions,
         pagination: {
           total: count,
           page: parseInt(page),
@@ -100,6 +117,7 @@ exports.getSessions = async (req, res) => {
 };
 
 // GET /expense-sessions/today  — get or create today's session
+// GET /expense-sessions/today  — get today's session or return 404
 exports.getTodaySession = async (req, res) => {
   try {
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -109,24 +127,113 @@ exports.getTodaySession = async (req, res) => {
       include: [{ model: DailyExpense, as: 'entries', order: [['entry_time', 'ASC']] }],
     });
 
+    // Don't auto-create - return 404 so frontend shows opening balance dialog
     if (!session) {
-      // Auto-create today's session with 0 opening balance (user sets it)
-      session = await DailyExpenseSession.create({
-        session_date: today,
-        opening_balance: 0.0,
-        total_expenses: 0.0,
-        total_supplier_payments: 0.0,
-        closing_balance: 0.0,
-        created_by: req.user?.id,
-      });
-      session = await DailyExpenseSession.findByPk(session.id, {
-        include: [{ model: DailyExpense, as: 'entries' }],
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No session found for today. Please create one with opening balance.',
+        data: null 
       });
     }
 
-    return res.json({ success: true, data: session });
+    // Format session data (same as before)
+    const formattedSession = {
+      id: session.id,
+      session_date: session.session_date,
+      opening_balance: parseFloat(session.opening_balance),
+      total_expenses: parseFloat(session.total_expenses),
+      total_supplier_payments: parseFloat(session.total_supplier_payments),
+      total_bill_payments: parseFloat(session.total_bill_payments || 0),
+      closing_balance: parseFloat(session.closing_balance),
+      notes: session.notes,
+      is_closed: session.is_closed,
+      closed_at: session.closed_at,
+      entries: session.entries?.map(entry => ({
+        id: entry.id,
+        entry_type: entry.entry_type,
+        category: entry.category,
+        description: entry.description,
+        amount: parseFloat(entry.amount),
+        payment_method: entry.payment_method,
+        bank_name: entry.bank_name,
+        cheque_number: entry.cheque_number,
+        reference_number: entry.reference_number,
+        supplier_id: entry.supplier_id,
+        bill_type: entry.bill_type,
+        bill_number: entry.bill_number,
+        consumer_number: entry.consumer_number,
+        bill_image: entry.bill_image,
+        entry_time: entry.entry_time,
+        supplier: entry.supplier,
+      })) || [],
+    };
+
+    return res.json({ success: true, data: formattedSession });
   } catch (err) {
     console.error('getTodaySession error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /expense-sessions/by-date?date=YYYY-MM-DD  — get session for a specific date
+exports.getSessionByDate = async (req, res) => {
+  try {
+    const { date } = req.query;
+    if (!date) {
+      return res.status(400).json({ success: false, message: 'date query param is required' });
+    }
+
+    const session = await DailyExpenseSession.findOne({
+      where: { session_date: date },
+      include: [
+        {
+          model: DailyExpense,
+          as: 'entries',
+          include: [{ model: Supplier, as: 'supplier', attributes: ['id', 'name', 'contact'] }],
+          order: [['entry_time', 'ASC']],
+        },
+      ],
+    });
+
+    if (!session) {
+      return res.status(404).json({ success: false, message: 'No session found for this date' });
+    }
+
+    // Format session data
+    const formattedSession = {
+      id: session.id,
+      session_date: session.session_date,
+      opening_balance: parseFloat(session.opening_balance),
+      total_expenses: parseFloat(session.total_expenses),
+      total_supplier_payments: parseFloat(session.total_supplier_payments),
+      total_bill_payments: parseFloat(session.total_bill_payments || 0),
+      closing_balance: parseFloat(session.closing_balance),
+      notes: session.notes,
+      is_closed: session.is_closed,
+      closed_at: session.closed_at,
+      entries: session.entries?.map(entry => ({
+        id: entry.id,
+        entry_type: entry.entry_type,
+        category: entry.category,
+        description: entry.description,
+        amount: parseFloat(entry.amount),
+        payment_method: entry.payment_method,
+        bank_name: entry.bank_name,
+        cheque_number: entry.cheque_number,
+        reference_number: entry.reference_number,
+        supplier_id: entry.supplier_id,
+        supplier: entry.supplier,
+        bill_type: entry.bill_type,
+        bill_number: entry.bill_number,
+        consumer_number: entry.consumer_number,
+        bill_image: entry.bill_image,
+        entry_time: entry.entry_time,
+      })) || [],
+    };
+
+    return res.json({ success: true, data: formattedSession });
+  } catch (err) {
+    console.error('getSessionByDate error:', err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -147,8 +254,42 @@ exports.getSession = async (req, res) => {
     if (!session) {
       return res.status(404).json({ success: false, message: 'Session not found' });
     }
-    return res.json({ success: true, data: session });
+
+    // Format session data
+    const formattedSession = {
+      id: session.id,
+      session_date: session.session_date,
+      opening_balance: parseFloat(session.opening_balance),
+      total_expenses: parseFloat(session.total_expenses),
+      total_supplier_payments: parseFloat(session.total_supplier_payments),
+      total_bill_payments: parseFloat(session.total_bill_payments || 0),
+      closing_balance: parseFloat(session.closing_balance),
+      notes: session.notes,
+      is_closed: session.is_closed,
+      closed_at: session.closed_at,
+      entries: session.entries?.map(entry => ({
+        id: entry.id,
+        entry_type: entry.entry_type,
+        category: entry.category,
+        description: entry.description,
+        amount: parseFloat(entry.amount),
+        payment_method: entry.payment_method,
+        bank_name: entry.bank_name,
+        cheque_number: entry.cheque_number,
+        reference_number: entry.reference_number,
+        supplier_id: entry.supplier_id,
+        supplier: entry.supplier,
+        bill_type: entry.bill_type,
+        bill_number: entry.bill_number,
+        consumer_number: entry.consumer_number,
+        bill_image: entry.bill_image,
+        entry_time: entry.entry_time,
+      })) || [],
+    };
+
+    return res.json({ success: true, data: formattedSession });
   } catch (err) {
+    console.error('getSession error:', err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -177,6 +318,7 @@ exports.createSession = async (req, res) => {
       opening_balance: ob.toFixed(2),
       total_expenses: '0.00',
       total_supplier_payments: '0.00',
+      total_bill_payments: '0.00',
       closing_balance: ob.toFixed(2),
       notes: notes || null,
       created_by: req.user?.id,
@@ -187,6 +329,7 @@ exports.createSession = async (req, res) => {
     if (err.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ success: false, message: 'Session already exists for this date' });
     }
+    console.error('createSession error:', err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -207,7 +350,9 @@ exports.updateOpeningBalance = async (req, res) => {
 
     const ob = parseFloat(opening_balance);
     const totalSpent =
-      parseFloat(session.total_expenses) + parseFloat(session.total_supplier_payments);
+      parseFloat(session.total_expenses) + 
+      parseFloat(session.total_supplier_payments) + 
+      parseFloat(session.total_bill_payments || 0);
 
     await session.update({
       opening_balance: ob.toFixed(2),
@@ -216,6 +361,7 @@ exports.updateOpeningBalance = async (req, res) => {
 
     return res.json({ success: true, data: session });
   } catch (err) {
+    console.error('updateOpeningBalance error:', err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -229,6 +375,7 @@ exports.closeSession = async (req, res) => {
     await session.update({ is_closed: true, closed_at: new Date() });
     return res.json({ success: true, message: 'Session closed', data: session });
   } catch (err) {
+    console.error('closeSession error:', err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -253,6 +400,7 @@ exports.addExpense = async (req, res) => {
       cheque_id,
       cheque_date,
       reference_number,
+      entry_date,
     } = req.body;
 
     // ── Validate ──
@@ -325,7 +473,7 @@ exports.addExpense = async (req, res) => {
         cheque_date: cheque_date || null,
         cheque_id: cheque_id || null,
         reference_number: reference_number || null,
-        entry_time: new Date(),
+        entry_time: entry_date ? new Date(entry_date) : new Date(),
         created_by: req.user?.id,
       },
       { transaction: dbTransaction }
@@ -377,7 +525,13 @@ exports.addExpense = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Expense added successfully',
-      data: { entry, session: updatedSession },
+      data: { 
+        entry, 
+        session: {
+          ...updatedSession.toJSON(),
+          total_bill_payments: parseFloat(updatedSession.total_bill_payments || 0)
+        }
+      },
     });
   } catch (err) {
     await dbTransaction.rollback();
@@ -403,6 +557,7 @@ exports.addSupplierPayment = async (req, res) => {
       cheque_id,
       cheque_date,
       reference_number,
+      entry_date,
     } = req.body;
 
     if (!supplier_id) {
@@ -591,7 +746,7 @@ exports.addSupplierPayment = async (req, res) => {
         reference_number: reference_number || null,
         supplier_id,
         supplier_ledger_id: ledgerEntry.id,
-        entry_time: new Date(),
+        entry_time: entry_date ? new Date(entry_date) : new Date(),
         created_by: req.user?.id,
       },
       { transaction: dbTransaction }
@@ -614,7 +769,10 @@ exports.addSupplierPayment = async (req, res) => {
       data: {
         expense_entry: expenseEntry,
         ledger_entry: ledgerEntry,
-        session: updatedSession,
+        session: {
+          ...updatedSession.toJSON(),
+          total_bill_payments: parseFloat(updatedSession.total_bill_payments || 0)
+        },
         ...(resolvedChequeId && { cheque_id: resolvedChequeId }),
       },
     });
@@ -622,6 +780,213 @@ exports.addSupplierPayment = async (req, res) => {
     await dbTransaction.rollback();
     console.error('addSupplierPayment error:', err);
     return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /expense-sessions/:sessionId/bill-payments
+// Adds a bill payment FROM this cash session
+exports.addBillPayment = async (req, res) => {
+  const dbTransaction = await sequelize.transaction();
+  try {
+    const { sessionId } = req.params;
+    const {
+      bill_type,
+      bill_name,
+      bill_number,
+      consumer_number,
+      description,
+      amount,
+      payment_method = 'cash',
+      bank_id,
+      bank_name,
+      cheque_number,
+      cheque_id,
+      cheque_date,
+      reference_number,
+      bill_image,
+      entry_date,
+    } = req.body;
+
+    if (!bill_type) {
+      await dbTransaction.rollback();
+      return res.status(400).json({ success: false, message: 'bill_type is required' });
+    }
+    if (!amount || parseFloat(amount) <= 0) {
+      await dbTransaction.rollback();
+      return res.status(400).json({ success: false, message: 'Valid amount required' });
+    }
+
+    const session = await DailyExpenseSession.findByPk(sessionId, {
+      transaction: dbTransaction,
+    });
+    if (!session) {
+      await dbTransaction.rollback();
+      return res.status(404).json({ success: false, message: 'Session not found' });
+    }
+    if (session.is_closed) {
+      await dbTransaction.rollback();
+      return res.status(400).json({ success: false, message: 'Session is closed' });
+    }
+
+    const billAmount = parseFloat(amount);
+
+    // ── Validate bank if needed ──
+    let selectedBank = null;
+    if ((payment_method === 'bank' || payment_method === 'cheque') && bank_id) {
+      selectedBank = await Bank.findByPk(bank_id, { transaction: dbTransaction });
+      if (!selectedBank) {
+        await dbTransaction.rollback();
+        return res.status(404).json({ success: false, message: 'Bank not found' });
+      }
+      if (payment_method === 'bank') {
+        if (parseFloat(selectedBank.balance) < billAmount) {
+          await dbTransaction.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient bank balance. Available: Rs ${parseFloat(selectedBank.balance).toFixed(2)}`,
+          });
+        }
+      }
+    }
+
+    // ── Check session cash balance for cash payments ──
+    if (payment_method === 'cash') {
+      const currentClosing = parseFloat(session.closing_balance);
+      if (currentClosing < billAmount) {
+        await dbTransaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient cash balance. Available: Rs ${currentClosing.toFixed(2)}`,
+        });
+      }
+    }
+
+    // ── Create bill payment entry ──
+    const entry = await DailyExpense.create(
+      {
+        session_id: sessionId,
+        entry_type: 'bill_payment',
+        category: bill_type,
+        description: description || `${bill_name || 'Bill'} Payment${bill_number ? ` - Bill #${bill_number}` : ''}`,
+        amount: billAmount.toFixed(2),
+        payment_method,
+        bank_id: bank_id || null,
+        bank_name: bank_name || null,
+        cheque_number: cheque_number || null,
+        cheque_date: cheque_date || null,
+        cheque_id: cheque_id || null,
+        reference_number: reference_number || null,
+        bill_type: bill_type,
+        bill_number: bill_number || null,
+        consumer_number: consumer_number || null,
+        bill_image: bill_image || null,
+        entry_time: entry_date ? new Date(entry_date) : new Date(),
+        created_by: req.user?.id,
+      },
+      { transaction: dbTransaction }
+    );
+
+    // ── Update bank balance for bank transfers ──
+    if (selectedBank && payment_method === 'bank') {
+      const newBalance = parseFloat(selectedBank.balance) - billAmount;
+      await selectedBank.update({ balance: newBalance.toFixed(2) }, { transaction: dbTransaction });
+      await BankTransaction.create(
+        {
+          bank_id: bank_id,
+          transaction_type: 'out',
+          amount: billAmount.toFixed(2),
+          description: `Bill Payment: ${description || bill_name || 'Bill'}`,
+          reference_number: reference_number || null,
+          balance_after: newBalance.toFixed(2),
+          created_by: req.user?.id,
+          transaction_date: new Date(),
+        },
+        { transaction: dbTransaction }
+      );
+    }
+
+    // ── Create cashbook entry for cash payments ──
+    if (payment_method === 'cash') {
+      const cbEntry = await createCashbookEntry({
+        entry_date: new Date(),
+        entry_type: 'cash_out',
+        source_type: 'bill_payment',
+        reference_id: entry.id,
+        reference_number: reference_number || null,
+        description: `Bill Payment: ${description || bill_name || 'Bill'}`,
+        amount: billAmount,
+        created_by: req.user?.id,
+        transaction: dbTransaction,
+      });
+      if (cbEntry?.id) {
+        await entry.update({ cashbook_entry_id: cbEntry.id }, { transaction: dbTransaction });
+      }
+    }
+
+    // ── Recalculate session totals ──
+    await recalculateSession(sessionId, dbTransaction);
+
+    await dbTransaction.commit();
+
+    const updatedSession = await DailyExpenseSession.findByPk(sessionId);
+    return res.status(201).json({
+      success: true,
+      message: 'Bill payment recorded successfully',
+      data: { 
+        entry, 
+        session: {
+          ...updatedSession.toJSON(),
+          total_bill_payments: parseFloat(updatedSession.total_bill_payments || 0)
+        }
+      },
+    });
+  } catch (err) {
+    await dbTransaction.rollback();
+    console.error('addBillPayment error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /expense-sessions/bills  — get all bill payments
+exports.getBillPayments = async (req, res) => {
+  try {
+    const billPayments = await DailyExpense.findAll({
+      where: {
+        entry_type: 'bill_payment',
+      },
+      order: [['entry_time', 'DESC']],
+    });
+
+    const formattedBills = billPayments.map(bill => ({
+      id: bill.id,
+      bill_type: bill.bill_type || 'other',
+      bill_name: bill.description || 'Bill Payment',
+      bill_number: bill.bill_number,
+      consumer_number: bill.consumer_number,
+      description: bill.description || '',
+      amount: parseFloat(bill.amount),
+      payment_method: bill.payment_method || 'cash',
+      bank_name: bill.bank_name,
+      cheque_number: bill.cheque_number,
+      reference_number: bill.reference_number,
+      entry_time: bill.entry_time,
+      bill_image: bill.bill_image,
+      session_id: bill.session_id,
+      created_at: bill.created_at,
+    }));
+
+    return res.json({
+      success: true,
+      data: formattedBills,
+      count: formattedBills.length,
+    });
+
+  } catch (error) {
+    console.error('getBillPayments error:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
@@ -708,213 +1073,16 @@ exports.deleteEntry = async (req, res) => {
     return res.json({
       success: true,
       message: 'Entry deleted and session recalculated',
-      data: { session: updatedSession },
+      data: { 
+        session: {
+          ...updatedSession.toJSON(),
+          total_bill_payments: parseFloat(updatedSession.total_bill_payments || 0)
+        }
+      },
     });
   } catch (err) {
     await dbTransaction.rollback();
     console.error('deleteEntry error:', err);
     return res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// POST /expense-sessions/:sessionId/bill-payments
-// Adds a bill payment FROM this cash session
-exports.addBillPayment = async (req, res) => {
-  const dbTransaction = await sequelize.transaction();
-  try {
-    const { sessionId } = req.params;
-    const {
-      bill_type,
-      bill_name,
-      bill_number,
-      consumer_number,
-      description,
-      amount,
-      payment_method = 'cash',
-      bank_id,
-      bank_name,
-      cheque_number,
-      cheque_id,
-      cheque_date,
-      reference_number,
-      bill_image,
-    } = req.body;
-
-    if (!bill_type) {
-      await dbTransaction.rollback();
-      return res.status(400).json({ success: false, message: 'bill_type is required' });
-    }
-    if (!amount || parseFloat(amount) <= 0) {
-      await dbTransaction.rollback();
-      return res.status(400).json({ success: false, message: 'Valid amount required' });
-    }
-
-    const session = await DailyExpenseSession.findByPk(sessionId, {
-      transaction: dbTransaction,
-    });
-    if (!session) {
-      await dbTransaction.rollback();
-      return res.status(404).json({ success: false, message: 'Session not found' });
-    }
-    if (session.is_closed) {
-      await dbTransaction.rollback();
-      return res.status(400).json({ success: false, message: 'Session is closed' });
-    }
-
-    const billAmount = parseFloat(amount);
-
-    // ── Validate bank if needed ──
-    let selectedBank = null;
-    if ((payment_method === 'bank' || payment_method === 'cheque') && bank_id) {
-      selectedBank = await Bank.findByPk(bank_id, { transaction: dbTransaction });
-      if (!selectedBank) {
-        await dbTransaction.rollback();
-        return res.status(404).json({ success: false, message: 'Bank not found' });
-      }
-      if (payment_method === 'bank') {
-        if (parseFloat(selectedBank.balance) < billAmount) {
-          await dbTransaction.rollback();
-          return res.status(400).json({
-            success: false,
-            message: `Insufficient bank balance. Available: Rs ${parseFloat(selectedBank.balance).toFixed(2)}`,
-          });
-        }
-      }
-    }
-
-    // ── Check session cash balance for cash payments ──
-    if (payment_method === 'cash') {
-      const currentClosing = parseFloat(session.closing_balance);
-      if (currentClosing < billAmount) {
-        await dbTransaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient cash balance. Available: Rs ${currentClosing.toFixed(2)}`,
-        });
-      }
-    }
-
-    // ── Create bill payment entry ──
-    const entry = await DailyExpense.create(
-      {
-        session_id: sessionId,
-        entry_type: 'bill_payment',
-        category: bill_type,
-        description: description || `${bill_name} Payment${bill_number ? ` - Bill #${bill_number}` : ''}`,
-        amount: billAmount.toFixed(2),
-        payment_method,
-        bank_id: bank_id || null,
-        bank_name: bank_name || null,
-        cheque_number: cheque_number || null,
-        cheque_date: cheque_date || null,
-        cheque_id: cheque_id || null,
-        reference_number: reference_number || null,
-        bill_type: bill_type,
-        bill_number: bill_number || null,
-        consumer_number: consumer_number || null,
-        bill_image: bill_image || null,
-        entry_time: new Date(),
-        created_by: req.user?.id,
-      },
-      { transaction: dbTransaction }
-    );
-
-    // ── Update bank balance for bank transfers ──
-    if (selectedBank && payment_method === 'bank') {
-      const newBalance = parseFloat(selectedBank.balance) - billAmount;
-      await selectedBank.update({ balance: newBalance.toFixed(2) }, { transaction: dbTransaction });
-      await BankTransaction.create(
-        {
-          bank_id: bank_id,
-          transaction_type: 'out',
-          amount: billAmount.toFixed(2),
-          description: `Bill Payment: ${description || bill_name}`,
-          reference_number: reference_number || null,
-          balance_after: newBalance.toFixed(2),
-          created_by: req.user?.id,
-          transaction_date: new Date(),
-        },
-        { transaction: dbTransaction }
-      );
-    }
-
-    // ── Create cashbook entry for cash payments ──
-    if (payment_method === 'cash') {
-      const cbEntry = await createCashbookEntry({
-        entry_date: new Date(),
-        entry_type: 'cash_out',
-        source_type: 'bill_payment',
-        reference_id: entry.id,
-        reference_number: reference_number || null,
-        description: `Bill Payment: ${description || bill_name}`,
-        amount: billAmount,
-        created_by: req.user?.id,
-        transaction: dbTransaction,
-      });
-      if (cbEntry?.id) {
-        await entry.update({ cashbook_entry_id: cbEntry.id }, { transaction: dbTransaction });
-      }
-    }
-
-    // ── Recalculate session totals ──
-    await recalculateSession(sessionId, dbTransaction);
-
-    await dbTransaction.commit();
-
-    const updatedSession = await DailyExpenseSession.findByPk(sessionId);
-    return res.status(201).json({
-      success: true,
-      message: 'Bill payment recorded successfully',
-      data: { entry, session: updatedSession },
-    });
-  } catch (err) {
-    await dbTransaction.rollback();
-    console.error('addBillPayment error:', err);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// Add this new method or update existing getBillPayments
-exports.getBillPayments = async (req, res) => {
-  try {
-    console.log('getBillPayments called'); // check if route is hit
-    
-    const billPayments = await DailyExpense.findAll({
-      where: {
-        entry_type: 'bill_payment',
-      },
-      order: [['entry_time', 'DESC']],
-    });
-
-    console.log('Found bills:', billPayments.length); // check count
-
-    const formattedBills = billPayments.map(bill => ({
-      id: bill.id,
-      bill_type: bill.bill_type || 'other',
-      bill_name: bill.description || 'Bill Payment',
-      bill_number: bill.bill_number,
-      consumer_number: bill.consumer_number,
-      description: bill.description || '',
-      amount: bill.amount,
-      payment_method: bill.payment_method || 'cash',
-      bank_name: bill.bank_name,
-      cheque_number: bill.cheque_number,
-      reference_number: bill.reference_number,
-      entry_time: bill.entry_time,
-      bill_image: bill.bill_image,
-    }));
-
-    return res.json({
-      success: true,
-      data: formattedBills,
-      count: formattedBills.length,
-    });
-
-  } catch (error) {
-    console.error('getBillPayments error:', error.message);
-    return res.status(500).json({
-      success: false,
-      message: error.message, // send actual error to Flutter
-    });
   }
 };

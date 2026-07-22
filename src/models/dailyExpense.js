@@ -33,6 +33,10 @@ module.exports = (sequelize) => {
         allowNull: false,
         defaultValue: 'expense',
       },
+      consumer_number: { 
+        type: DataTypes.STRING(100), 
+        allowNull: true 
+      },
       category: { type: DataTypes.STRING(100), allowNull: true },
       description: { type: DataTypes.TEXT, allowNull: false },
       amount: {

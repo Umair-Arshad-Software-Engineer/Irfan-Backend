@@ -34,6 +34,10 @@ module.exports = (sequelize) => {
         type: DataTypes.DECIMAL(15, 2),
         defaultValue: 0.0,
       },
+      total_bill_payments: {
+        type: DataTypes.DECIMAL(15, 2),
+        defaultValue: 0.0,
+      },
       total_supplier_payments: {
         type: DataTypes.DECIMAL(15, 2),
         defaultValue: 0.0,
