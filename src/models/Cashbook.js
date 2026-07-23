@@ -9,8 +9,19 @@ module.exports = (sequelize) => {
       type: DataTypes.ENUM('cash_in', 'cash_out'),
       allowNull: false,
     },
+    // source_type: {
+    //   type: DataTypes.ENUM('customer_payment', 'supplier_payment', 'manual', 'opening_balance'),
+    //   allowNull: false,
+    // },
     source_type: {
-      type: DataTypes.ENUM('customer_payment', 'supplier_payment', 'manual', 'opening_balance'),
+      type: DataTypes.ENUM(
+        'customer_payment',
+        'supplier_payment',
+        'manual',
+        'opening_balance',
+        'daily_expense',
+        'bill_payment'
+      ),
       allowNull: false,
     },
     reference_id: { type: DataTypes.INTEGER, allowNull: true },
