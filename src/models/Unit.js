@@ -20,10 +20,6 @@ module.exports = (sequelize) => {
       type: DataTypes.STRING,
       allowNull: false,
       unique: true,
-      validate: {
-        notEmpty: true,
-        len: [1, 10]
-      }
     },
     type: {
       type: DataTypes.ENUM('weight', 'volume', 'count', 'length', 'area', 'custom'),
@@ -54,10 +50,6 @@ module.exports = (sequelize) => {
     timestamps: true,
     tableName: 'units',
     indexes: [
-      {
-        unique: true,
-        fields: ['symbol']
-      },
       {
         fields: ['type']
       },

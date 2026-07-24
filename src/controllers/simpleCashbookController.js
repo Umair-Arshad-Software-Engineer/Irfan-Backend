@@ -50,6 +50,9 @@ const createSimpleCashbookEntry = async ({
   description,
   amount,
   created_by,
+  bank_transaction_id = null,
+  cheque_id = null,
+  legacy_cashbook_id = null,   // ✅ NEW
   transaction,
 }) => {
   const entry = await SimpleCashbook.create(
@@ -63,6 +66,9 @@ const createSimpleCashbookEntry = async ({
       amount: parseFloat(amount).toFixed(2),
       balance: '0.00',
       created_by: created_by || null,
+      bank_transaction_id,
+      cheque_id,
+      legacy_cashbook_id,        // ✅ NEW
     },
     { transaction }
   );
@@ -116,7 +122,6 @@ exports.getSimpleCashbook = async (req, res) => {
       offset,
     });
 
-    // Calculate period summary (filtered by date range)
     const filteredEntries = await SimpleCashbook.findAll({
       where,
       attributes: ['entry_type', 'amount'],
@@ -131,7 +136,6 @@ exports.getSimpleCashbook = async (req, res) => {
       .filter(e => e.entry_type === 'cash_out')
       .reduce((s, e) => s + parseFloat(e.amount), 0);
 
-    // Daily cash on hand: For the selected date, it's (cash_in - cash_out) for that day
     const dayNetFlow = periodIn - periodOut;
 
     res.json({
@@ -158,7 +162,7 @@ exports.getSimpleCashbook = async (req, res) => {
   }
 };
 
-// POST /simple-cashbook/manual
+// backend/src/controllers/simpleCashbookController.js
 exports.addManualEntry = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -168,8 +172,7 @@ exports.addManualEntry = async (req, res) => {
       description, 
       amount, 
       reference_number,
-      // ✅ New fields
-      payment_method,  // 'cash', 'bank', 'cheque', 'slip'
+      payment_method,
       bank_id,
       bank_name,
       cheque_number,
@@ -191,7 +194,6 @@ exports.addManualEntry = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Description is required' });
     }
 
-    // Cash out ke liye balance check
     if (entry_type === 'cash_out') {
       const balanceBeforeEntry = await getBalanceUpToDate(entry_date, t);
       if (balanceBeforeEntry < parseFloat(amount)) {
@@ -203,13 +205,8 @@ exports.addManualEntry = async (req, res) => {
       }
     }
 
-    // ✅ Reference number build karo method ke hisaab se
-    const finalRefNumber = reference_number 
-      || cheque_number 
-      || slip_number 
-      || null;
+    const finalRefNumber = reference_number || cheque_number || slip_number || null;
 
-    // ✅ Description mein method detail add karo
     const methodDetails = {
       bank: bank_name ? ` | Bank: ${bank_name}` : '',
       cheque: [bank_name ? ` | Bank: ${bank_name}` : '', cheque_number ? ` | Chq#: ${cheque_number}` : ''].join(''),
@@ -218,34 +215,22 @@ exports.addManualEntry = async (req, res) => {
     
     const finalDescription = description.trim() + (methodDetails[payment_method] || '');
 
-    const entry = await createSimpleCashbookEntry({
-      entry_date: entry_date || new Date(),
-      entry_type,
-      source_type: 'manual',
-      reference_number: finalRefNumber,
-      description: finalDescription,
-      amount: parseFloat(amount),
-      created_by: req.user?.id,
-      transaction: t,
-    });
+    let linkedBankTransactionId = null;
+    let linkedChequeId = null;
 
-    // ✅ Bank transaction create karo agar bank/slip method ho
     if ((payment_method === 'bank' || payment_method === 'slip') && bank_id) {
       const { Bank, BankTransaction } = require('../models');
       const bank = await Bank.findByPk(bank_id, { transaction: t });
-      
+
       if (bank) {
         const isIn = entry_type === 'cash_in';
-        const newBalance = isIn 
+        const newBalance = isIn
           ? parseFloat(bank.balance) + parseFloat(amount)
           : parseFloat(bank.balance) - parseFloat(amount);
 
-        await bank.update(
-          { balance: newBalance.toFixed(2) },
-          { transaction: t }
-        );
+        await bank.update({ balance: newBalance.toFixed(2) }, { transaction: t });
 
-        await BankTransaction.create({
+        const bankTx = await BankTransaction.create({
           bank_id: bank_id,
           transaction_type: isIn ? 'in' : 'out',
           amount: parseFloat(amount).toFixed(2),
@@ -255,13 +240,14 @@ exports.addManualEntry = async (req, res) => {
           created_by: req.user?.id,
           transaction_date: entry_date || new Date(),
         }, { transaction: t });
+
+        linkedBankTransactionId = bankTx.id;
       }
     }
 
-    // ✅ Cheque record create karo
     if (payment_method === 'cheque' && cheque_number) {
       const { Cheque } = require('../models');
-      await Cheque.create({
+      const cheque = await Cheque.create({
         cheque_number,
         cheque_date: cheque_date ? new Date(cheque_date) : null,
         amount: parseFloat(amount),
@@ -272,7 +258,22 @@ exports.addManualEntry = async (req, res) => {
         description: finalDescription,
         created_by: req.user?.id,
       }, { transaction: t });
+
+      linkedChequeId = cheque.id;
     }
+
+    const entry = await createSimpleCashbookEntry({
+      entry_date: entry_date || new Date(),
+      entry_type,
+      source_type: 'manual',
+      reference_number: finalRefNumber,
+      description: finalDescription,
+      amount: parseFloat(amount),
+      bank_transaction_id: linkedBankTransactionId,
+      cheque_id: linkedChequeId,
+      created_by: req.user?.id,
+      transaction: t,
+    });
 
     await t.commit();
     res.status(201).json({
@@ -284,6 +285,212 @@ exports.addManualEntry = async (req, res) => {
     await t.rollback();
     console.error('Add manual simple cashbook entry error:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// ── UPDATE description for customer entry ────────────────────────────────────
+exports.updateEntryDescription = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { id } = req.params;
+    const { description } = req.body;
+
+    if (!description || !description.trim()) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Description is required',
+      });
+    }
+
+    const entry = await SimpleCashbook.findByPk(id, { transaction: t });
+    if (!entry) {
+      await t.rollback();
+      return res.status(404).json({
+        success: false,
+        message: 'Entry not found',
+      });
+    }
+
+    const newDescription = description.trim();
+    const updated = {
+      cashbook: true,
+      ledger: 0,
+      sale: 0,
+      bank_transaction: false,
+      cheque: false,
+      legacy_cashbook: false,   // ✅ NEW
+    };
+
+    // 1. The cashbook entry itself
+    await entry.update({ description: newDescription }, { transaction: t });
+
+    // 2. Customer ledger payment entry — matched by reference_id + type
+    if (entry.source_type === 'customer_payment' && entry.reference_id) {
+      const { CustomerLedger } = require('../models');
+      const [ledgerCount] = await CustomerLedger.update(
+        { description: newDescription },
+        {
+          where: {
+            reference_id: entry.reference_id,
+            transaction_type: 'payment',
+          },
+          transaction: t,
+        }
+      );
+      updated.ledger = ledgerCount;
+
+      const { Sale } = require('../models');
+      const sale = await Sale.findByPk(entry.reference_id, { transaction: t });
+      if (sale) {
+        updated.sale = 1;
+        // sale.notes is intentionally left alone — see note in original code.
+      }
+    }
+
+    // 3. Bank transaction — direct FK, no string search
+    if (entry.bank_transaction_id) {
+      const { BankTransaction } = require('../models');
+      const [bankCount] = await BankTransaction.update(
+        { description: newDescription },
+        { where: { id: entry.bank_transaction_id }, transaction: t }
+      );
+      updated.bank_transaction = bankCount > 0;
+    }
+
+    // 4. Cheque — direct FK, no string search
+    if (entry.cheque_id) {
+      const { Cheque } = require('../models');
+      const [chequeCount] = await Cheque.update(
+        { description: newDescription },
+        { where: { id: entry.cheque_id }, transaction: t }
+      );
+      updated.cheque = chequeCount > 0;
+    }
+
+    // 5. Legacy cashbook entry — direct FK, no string search
+    // ✅ NEW — mirrors the bank_transaction/cheque pattern. Requires
+    // legacy_cashbook_id column added to SimpleCashbook, and that
+    // createCashbookEntry() returns the created row (or at least an .id)
+    // so recordPayment() can capture and pass it in.
+    if (entry.legacy_cashbook_id) {
+      const { Cashbook } = require('../models'); // adjust model name if different
+      if (Cashbook) {
+        const [legacyCount] = await Cashbook.update(
+          { description: newDescription },
+          { where: { id: entry.legacy_cashbook_id }, transaction: t }
+        );
+        updated.legacy_cashbook = legacyCount > 0;
+      }
+    }
+
+    await t.commit();
+
+    const updatedEntry = await SimpleCashbook.findByPk(id);
+
+    res.json({
+      success: true,
+      message: 'Description updated successfully',
+      data: updatedEntry,
+      debug: updated,
+    });
+  } catch (error) {
+    await t.rollback();
+    console.error('Update entry description error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message,
+    });
+  }
+};
+
+// ── UPDATE manual entry ──────────────────────────────────────────────────────
+exports.updateManualEntry = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { id } = req.params;
+    const { entry_type, amount, description, entry_date } = req.body;
+
+    if (!entry_type || !['cash_in', 'cash_out'].includes(entry_type)) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: 'entry_type must be cash_in or cash_out' });
+    }
+    if (!amount || parseFloat(amount) <= 0) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: 'Valid amount required' });
+    }
+    if (!description?.trim()) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: 'Description is required' });
+    }
+
+    const entry = await SimpleCashbook.findByPk(id, { transaction: t });
+    if (!entry) {
+      await t.rollback();
+      return res.status(404).json({ success: false, message: 'Entry not found' });
+    }
+
+    if (entry.source_type !== 'manual') {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: 'Only manual entries can be edited' });
+    }
+
+    const newDate = entry_date ? new Date(entry_date) : entry.entry_date;
+    const newAmount = parseFloat(amount);
+    const newDescription = description.trim();
+
+    await entry.update({
+      entry_type: entry_type,
+      amount: newAmount.toFixed(2),
+      description: newDescription,
+      entry_date: newDate,
+    }, { transaction: t });
+
+    if (entry.bank_transaction_id) {
+      const { BankTransaction } = require('../models');
+      await BankTransaction.update(
+        { description: newDescription },
+        { where: { id: entry.bank_transaction_id }, transaction: t }
+      );
+    }
+    if (entry.cheque_id) {
+      const { Cheque } = require('../models');
+      await Cheque.update(
+        { description: newDescription },
+        { where: { id: entry.cheque_id }, transaction: t }
+      );
+    }
+    // ✅ NEW — keep legacy cashbook in sync for manual entries too, if ever linked
+    if (entry.legacy_cashbook_id) {
+      const { Cashbook } = require('../models');
+      if (Cashbook) {
+        await Cashbook.update(
+          { description: newDescription },
+          { where: { id: entry.legacy_cashbook_id }, transaction: t }
+        );
+      }
+    }
+
+    await recalculateBalances(t);
+
+    await t.commit();
+
+    const updatedEntry = await SimpleCashbook.findByPk(id);
+
+    res.json({
+      success: true,
+      message: 'Entry updated successfully',
+      data: updatedEntry,
+    });
+  } catch (error) {
+    await t.rollback();
+    console.error('Update manual entry error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
   }
 };
 
@@ -332,10 +539,7 @@ exports.getDailySummary = async (req, res) => {
     const cashIn = entries.filter(e => e.entry_type === 'cash_in').reduce((s, e) => s + parseFloat(e.amount), 0);
     const cashOut = entries.filter(e => e.entry_type === 'cash_out').reduce((s, e) => s + parseFloat(e.amount), 0);
     
-    // Daily cash on hand is cash_in - cash_out for the selected date
     const dailyCashOnHand = cashIn - cashOut;
-
-    // Get cumulative balance up to this date (all-time)
     const cumulativeBalance = await getBalanceUpToDate(targetDate);
 
     res.json({

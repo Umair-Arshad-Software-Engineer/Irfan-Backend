@@ -48,46 +48,62 @@ exports.calculateSalary = async (req, res) => {
       return res.status(400).json({ success: false, message: 'employee_id, from_date and to_date are required' });
     }
 
-    const employee = await Employee.findByPk(employee_id);
+    // Normalize employee_id to an integer to avoid string/int mismatch issues
+    const empId = parseInt(employee_id, 10);
+    if (isNaN(empId)) {
+      return res.status(400).json({ success: false, message: 'Invalid employee_id' });
+    }
+
+    const employee = await Employee.findByPk(empId);
     if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
 
     const totalDays = countCalendarDays(from_date, to_date);
     const records   = await Attendance.findAll({
-      where: { employee_id, date: { [Op.between]: [from_date, to_date] } },
+      where: { employee_id: empId, date: { [Op.between]: [from_date, to_date] } },
     });
 
     const { present, absent, halfDays, leave } = summarise(records, totalDays);
 
     let calculatedSalary = 0;
-    const baseSalary = parseFloat(employee.salary);
+    const baseSalary = parseFloat(employee.salary) || 0;
 
-    if (employee.salary_type === 'Monthly') {
+    // Normalize salary_type comparison: trim + lowercase to avoid case/whitespace mismatches
+    const salaryType = (employee.salary_type || '').toString().trim().toLowerCase();
+
+    if (salaryType === 'monthly') {
       calculatedSalary = present * (baseSalary / 30);
-    } else if (employee.salary_type === 'Daily') {
+    } else if (salaryType === 'daily') {
       calculatedSalary = present * baseSalary;
-    } else {
-      // Contract - get work entries
+    } else if (salaryType === 'contract') {
       const workEntries = await ContractWorkEntry.findAll({
         where: {
-          employee_id,
+          employee_id: empId,
           date: { [Op.between]: [from_date, to_date] },
         },
       });
-      calculatedSalary = workEntries.reduce((sum, e) => sum + parseFloat(e.total_amount), 0);
+
+      console.log(`[calculateSalary] Contract employee ${empId}: found ${workEntries.length} work entries between ${from_date} and ${to_date}`);
+      workEntries.forEach(e => {
+        console.log(`  entry id=${e.id} date=${e.date} qty=${e.quantity} total=${e.total_amount}`);
+      });
+
+      calculatedSalary = workEntries.reduce((sum, e) => sum + (parseFloat(e.total_amount) || 0), 0);
+    } else {
+      console.warn(`[calculateSalary] Unknown salary_type "${employee.salary_type}" for employee ${empId}`);
     }
 
-    // ── Pending advances & expenses for this employee ─────────────────────────
+    // ── Pending advances & expenses ─────────────────────────────────────────
     const pendingAdvances = await AdvancePayment.findAll({
-      where: { employee_id, status: 'pending' },
+      where: { employee_id: empId, status: 'pending' },
       order: [['date', 'ASC']],
     });
     const pendingExpenses = await EmployeeExpense.findAll({
-      where: { employee_id, status: 'pending' },
+      where: { employee_id: empId, status: 'pending' },
       order: [['date', 'ASC']],
     });
 
-    const totalAdvance  = pendingAdvances.reduce((s, a) => s + parseFloat(a.amount), 0);
-    const totalExpense  = pendingExpenses.reduce((s, e) => s + parseFloat(e.amount), 0);
+    const totalAdvance    = pendingAdvances.reduce((s, a) => s + parseFloat(a.amount), 0);
+    const totalExpense    = pendingExpenses.reduce((s, e) => s + parseFloat(e.amount), 0);
     const totalDeductions = totalAdvance + totalExpense;
     const netSalary       = Math.max(0, calculatedSalary - totalDeductions);
 

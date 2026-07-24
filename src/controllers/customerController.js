@@ -1,6 +1,6 @@
 // backend/src/controllers/customerController.js
 const { Op } = require('sequelize');
-const { Customer } = require('../models');
+const { Customer, CustomerLedger, Sale, Cheque } = require('../models');
 
 // ─────────────────────────────────────────────
 //  GET ALL CUSTOMERS  (paginated + search)
@@ -28,7 +28,6 @@ exports.getAllCustomers = async (req, res) => {
 
     const { count, rows: customers } = await Customer.findAndCountAll({
       where: whereClause,
-      // discount_percent included so the Flutter app can use it
       attributes: [
         'id', 'name', 'contact', 'address', 'email',
         'customer_type', 'balance', 'discount_percent',
@@ -116,7 +115,6 @@ exports.createCustomer = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Customer with this contact already exists' });
     }
 
-    // Validate discount_percent range
     const parsedDiscount = parseFloat(discount_percent) || 0;
     if (parsedDiscount < 0 || parsedDiscount > 100) {
       return res.status(400).json({ success: false, message: 'Discount percent must be between 0 and 100' });
@@ -162,7 +160,6 @@ exports.updateCustomer = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
-    // Check contact uniqueness (exclude current record)
     if (contact && contact !== customer.contact) {
       const existing = await Customer.findOne({
         where: { contact, id: { [Op.ne]: id } },
@@ -172,7 +169,6 @@ exports.updateCustomer = async (req, res) => {
       }
     }
 
-    // Validate discount_percent if provided
     let parsedDiscount = customer.discount_percent;
     if (discount_percent !== undefined) {
       parsedDiscount = parseFloat(discount_percent) || 0;
@@ -218,6 +214,20 @@ exports.updateCustomer = async (req, res) => {
 
 // ─────────────────────────────────────────────
 //  DELETE CUSTOMER
+//  ✅ FIX: previously this called customer.destroy() with no checks at all.
+//  If the customer had any CustomerLedger, Sale, or Cheque rows referencing
+//  them (customer_id FK), MySQL/Sequelize rejects the delete with a
+//  SequelizeForeignKeyConstraintError — which then got caught by the
+//  generic catch block and sent back as a raw, unfriendly error message
+//  (e.g. "Cannot delete or update a parent row: a foreign key constraint
+//  fails ..."). From the Flutter side this looked like "delete does
+//  nothing" or showed a confusing error in the snackbar.
+//
+//  Now we explicitly check for transaction history first and return a
+//  clean 400 with a clear message telling the user to deactivate instead.
+//  We also still catch SequelizeForeignKeyConstraintError specifically as
+//  a fallback, in case some other table (not checked below) references
+//  this customer too.
 // ─────────────────────────────────────────────
 exports.deleteCustomer = async (req, res) => {
   try {
@@ -228,10 +238,48 @@ exports.deleteCustomer = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
+    // Check whether this customer has any real transaction history.
+    // If they do, block the hard delete — deleting them would either fail
+    // on the FK constraint anyway, or (worse, if the FK isn't enforced)
+    // silently orphan ledger/sale/cheque records.
+    const [ledgerCount, saleCount, chequeCount] = await Promise.all([
+      CustomerLedger.count({ where: { customer_id: id } }),
+      Sale.count({ where: { customer_id: id } }),
+      Cheque.count({ where: { customer_id: id } }),
+    ]);
+
+    if (ledgerCount > 0 || saleCount > 0 || chequeCount > 0) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'This customer has existing transactions (ledger entries, sales, or cheques) and cannot be deleted. ' +
+          'Please deactivate the customer instead to preserve their history.',
+        data: {
+          ledger_entries: ledgerCount,
+          sales: saleCount,
+          cheques: chequeCount,
+        },
+      });
+    }
+
     await customer.destroy();
     res.json({ success: true, message: 'Customer deleted successfully' });
   } catch (error) {
     console.error('Delete customer error:', error);
+
+    // Fallback safety net: if some other, unchecked table still has an FK
+    // to this customer, Sequelize/MySQL will throw this specific error.
+    // Translate it into a friendly message instead of leaking the raw
+    // SQL error text to the client.
+    if (error.name === 'SequelizeForeignKeyConstraintError') {
+      return res.status(400).json({
+        success: false,
+        message:
+          'This customer is linked to other records and cannot be deleted. ' +
+          'Please deactivate the customer instead.',
+      });
+    }
+
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };

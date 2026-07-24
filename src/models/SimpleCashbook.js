@@ -23,6 +23,14 @@ module.exports = (sequelize) => {
     },
     balance: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
     created_by: { type: DataTypes.INTEGER, allowNull: true },
+    // Direct links so description edits don't need string-matching
+    bank_transaction_id: { type: DataTypes.INTEGER, allowNull: true },
+    cheque_id: { type: DataTypes.INTEGER, allowNull: true },
+    // ✅ NEW — links to the legacy (non-simple) cashbook entry created by
+    // createCashbookEntry() for cash customer payments, so description
+    // edits can propagate there too, the same way they do for bank_transaction_id
+    // and cheque_id.
+    legacy_cashbook_id: { type: DataTypes.INTEGER, allowNull: true },
   }, {
     tableName: 'simple_cashbook',
     timestamps: true,
