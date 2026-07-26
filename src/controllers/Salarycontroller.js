@@ -48,7 +48,6 @@ exports.calculateSalary = async (req, res) => {
       return res.status(400).json({ success: false, message: 'employee_id, from_date and to_date are required' });
     }
 
-    // Normalize employee_id to an integer to avoid string/int mismatch issues
     const empId = parseInt(employee_id, 10);
     if (isNaN(empId)) {
       return res.status(400).json({ success: false, message: 'Invalid employee_id' });
@@ -67,18 +66,30 @@ exports.calculateSalary = async (req, res) => {
     let calculatedSalary = 0;
     const baseSalary = parseFloat(employee.salary) || 0;
 
-    // Normalize salary_type comparison: trim + lowercase to avoid case/whitespace mismatches
+    // FIX #1: robust salary_type matching — use includes() instead of strict
+    // equality so variants like "Contract Work", "CONTRACT", trailing spaces,
+    // or slightly different labels stored in the DB still match correctly.
     const salaryType = (employee.salary_type || '').toString().trim().toLowerCase();
+
+    console.log(`[calculateSalary] employee.salary_type RAW = "${employee.salary_type}" (type: ${typeof employee.salary_type}) -> normalized="${salaryType}"`);
 
     if (salaryType === 'monthly') {
       calculatedSalary = present * (baseSalary / 30);
+
     } else if (salaryType === 'daily') {
       calculatedSalary = present * baseSalary;
-    } else if (salaryType === 'contract') {
+
+    } else if (salaryType.includes('contract')) {
+      // FIX #2: timezone-safe date range. Using Op.between with plain date
+      // strings can silently exclude rows if the `date` column has a time
+      // component or timezone offset. Explicitly bound the full day range.
       const workEntries = await ContractWorkEntry.findAll({
         where: {
           employee_id: empId,
-          date: { [Op.between]: [from_date, to_date] },
+          date: {
+            [Op.gte]: `${from_date} 00:00:00`,
+            [Op.lte]: `${to_date} 23:59:59`,
+          },
         },
       });
 
@@ -88,8 +99,9 @@ exports.calculateSalary = async (req, res) => {
       });
 
       calculatedSalary = workEntries.reduce((sum, e) => sum + (parseFloat(e.total_amount) || 0), 0);
+
     } else {
-      console.warn(`[calculateSalary] Unknown salary_type "${employee.salary_type}" for employee ${empId}`);
+      console.warn(`[calculateSalary] Unknown salary_type "${employee.salary_type}" (normalized: "${salaryType}") for employee ${empId} — calculatedSalary defaulting to 0`);
     }
 
     // ── Pending advances & expenses ─────────────────────────────────────────
