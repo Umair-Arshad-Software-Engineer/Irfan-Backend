@@ -73,22 +73,45 @@ exports.createEmployee = async (req, res) => {
 exports.updateEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    const { 
-      name, father_name, phone, address, salary, salary_type, 
-      is_active, join_date, contract_unit, unit_price, 
-      overtime_rate, standard_working_hours 
-    } = req.body;
-
     const employee = await Employee.findByPk(id);
     if (!employee) {
       return res.status(404).json({ success: false, message: 'Employee not found' });
     }
 
-    await employee.update({ 
-      name, father_name, phone, address, salary, salary_type, 
-      is_active, join_date, contract_unit, unit_price, 
-      overtime_rate, standard_working_hours 
-    });
+    const {
+      name, father_name, phone, address, salary, salary_type,
+      is_active, join_date, contract_unit, unit_price,
+      overtime_rate, standard_working_hours
+    } = req.body;
+
+    // Only include fields that were actually sent in the request
+    const updates = {};
+    if (name !== undefined) updates.name = name;
+    if (father_name !== undefined) updates.father_name = father_name;
+    if (phone !== undefined) updates.phone = phone;
+    if (address !== undefined) updates.address = address;
+    if (salary !== undefined) updates.salary = salary;
+    if (salary_type !== undefined) updates.salary_type = salary_type;
+    if (is_active !== undefined) updates.is_active = is_active;
+    if (join_date !== undefined) updates.join_date = join_date;
+    if (overtime_rate !== undefined) updates.overtime_rate = overtime_rate;
+    if (standard_working_hours !== undefined) updates.standard_working_hours = standard_working_hours;
+
+    // Handle salary_type-dependent fields explicitly, mirroring createEmployee's logic
+    if (salary_type === 'Contract') {
+      updates.contract_unit = contract_unit ?? employee.contract_unit;
+      updates.unit_price = unit_price ?? employee.unit_price;
+    } else if (salary_type !== undefined) {
+      // Switching away from Contract (or staying non-contract): clear contract-only fields
+      updates.contract_unit = null;
+      updates.unit_price = null;
+    } else {
+      // salary_type not sent at all — leave contract fields untouched unless explicitly provided
+      if (contract_unit !== undefined) updates.contract_unit = contract_unit;
+      if (unit_price !== undefined) updates.unit_price = unit_price;
+    }
+
+    await employee.update(updates);
 
     res.json({
       success: true,
