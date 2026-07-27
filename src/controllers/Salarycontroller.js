@@ -2,7 +2,7 @@
 const { Op } = require('sequelize');
 const { Employee, Attendance, SalaryPayment, AdvancePayment, EmployeeExpense, ContractWorkEntry } = require('../models');
 
-// ── Helper: calendar days (inclusive) ────────────────────────────────────────
+// ── Helper: calendar days (inclusives) ────────────────────────────────────────
 function countCalendarDays(from, to) {
   const diff = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
   return diff > 0 ? diff : 0;
