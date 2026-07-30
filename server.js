@@ -127,6 +127,25 @@ app.get('/', (req, res) => {
   res.json({ message: 'API running', timestamp: new Date().toISOString() });
 });
 
+// ── 404 handler (must come after all routes) ────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `Route not found: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+// ── Global error handler (must be last, 4 args) ──────────────────────────────
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err.stack);
+  res.status(500).json({
+    success: false,
+    message: 'Server error',
+    error: err.message,
+  });
+});
+
+
 // ── Seed Admin User ──────────────────────────────────────────────────────────
 async function seedAdminUser() {
   try {

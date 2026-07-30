@@ -11,6 +11,3 @@ router.delete('/:id',               ctrl.deleteAdvance);
 module.exports = router;
 
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Save as routes/empExpenseRoutes.js separately — shown here for reference:
-// ─────────────────────────────────────────────────────────────────────────────

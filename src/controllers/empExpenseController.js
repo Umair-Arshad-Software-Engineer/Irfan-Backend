@@ -1,34 +1,97 @@
-const { EmployeeExpense } = require('../models');
+// controllers/empExpenseController.js
+const { Op } = require('sequelize');
+const { EmployeeExpense, Employee, sequelize } = require('../models');
+
+// ── Helper: Update employee balances ─────────────────────────────────────────
+async function updateEmployeeBalances(employee_id, transaction = null) {
+  const expenses = await EmployeeExpense.findAll({
+    where: { employee_id },
+    order: [['date', 'ASC'], ['createdAt', 'ASC']],
+    transaction
+  });
+
+  let balance = 0;
+  for (const expense of expenses) {
+    const amount = parseFloat(expense.amount);
+    if (expense.entry_type === 'credit') {
+      balance += amount;
+    } else if (expense.entry_type === 'debit') {
+      balance -= amount;
+    }
+    await expense.update({ balance }, { transaction });
+  }
+  return balance;
+}
 
 // ── GET expenses for an employee ──────────────────────────────────────────────
 exports.getExpensesByEmployee = async (req, res) => {
   try {
     const { employeeId } = req.params;
-    const { status, category } = req.query;
+    const { entry_type, category } = req.query;
 
     const where = { employee_id: employeeId };
-    if (status)   where.status   = status;
+    if (entry_type) where.entry_type = entry_type;
     if (category) where.category = category;
 
     const expenses = await EmployeeExpense.findAll({
       where,
-      order: [['date', 'DESC']],
+      include: [{ 
+        model: Employee, 
+        as: 'employee',  // ← FIX: Added 'as' keyword
+        attributes: ['id', 'name'] 
+      }],
+      order: [['date', 'DESC'], ['createdAt', 'DESC']],
     });
 
-    // ── Summary ───────────────────────────────────────────────────────────────
-    const all = await EmployeeExpense.findAll({ where: { employee_id: employeeId } });
-    const totalAmount    = all.reduce((s, e) => s + parseFloat(e.amount), 0);
-    const totalRecovered = all.filter(e => e.status === 'recovered').reduce((s, e) => s + parseFloat(e.amount), 0);
-    const pendingBalance = totalAmount - totalRecovered;
+    // ── Summary with running balance ───────────────────────────────────────────
+    const allExpenses = await EmployeeExpense.findAll({
+      where: { employee_id: employeeId },
+      order: [['date', 'ASC'], ['createdAt', 'ASC']],
+    });
+
+    let runningBalance = 0;
+    const expensesWithBalance = allExpenses.map(exp => {
+      const amount = parseFloat(exp.amount);
+      if (exp.entry_type === 'credit') {
+        runningBalance += amount;
+      } else {
+        runningBalance -= amount;
+      }
+      return {
+        ...exp.toJSON(),
+        running_balance: Math.round(runningBalance * 100) / 100
+      };
+    });
+
+    const creditEntries = expensesWithBalance.filter(e => e.entry_type === 'credit');
+    const debitEntries = expensesWithBalance.filter(e => e.entry_type === 'debit');
+
+    const totalCredit = creditEntries.reduce((sum, e) => sum + parseFloat(e.amount), 0);
+    const totalDebit = debitEntries.reduce((sum, e) => sum + parseFloat(e.amount), 0);
+    const currentBalance = totalCredit - totalDebit;
+
+    // Group by category
+    const categorySummary = {};
+    creditEntries.forEach(expense => {
+      const cat = expense.category || 'Other';
+      if (!categorySummary[cat]) {
+        categorySummary[cat] = { total: 0, count: 0 };
+      }
+      categorySummary[cat].total += parseFloat(expense.amount);
+      categorySummary[cat].count++;
+    });
 
     res.json({
       success: true,
       data: expenses,
       count: expenses.length,
       summary: {
-        total_amount:    Math.round(totalAmount    * 100) / 100,
-        total_recovered: Math.round(totalRecovered * 100) / 100,
-        pending_balance: Math.round(pendingBalance * 100) / 100,
+        total_credit: Math.round(totalCredit * 100) / 100,
+        total_debit: Math.round(totalDebit * 100) / 100,
+        current_balance: Math.round(currentBalance * 100) / 100,
+        credit_count: creditEntries.length,
+        debit_count: debitEntries.length,
+        category_summary: categorySummary
       },
     });
   } catch (error) {
@@ -46,11 +109,51 @@ exports.createExpense = async (req, res) => {
       return res.status(400).json({ success: false, message: 'employee_id, amount, date and category are required' });
     }
 
-    const expense = await EmployeeExpense.create({
-      employee_id, amount, date, category, description: description || null,
-    });
+    const employee = await Employee.findByPk(employee_id);
+    if (!employee) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
 
-    res.status(201).json({ success: true, message: 'Expense created', data: expense });
+    if (parseFloat(amount) <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
+    }
+
+    const transaction = await sequelize.transaction();
+
+    try {
+      const expense = await EmployeeExpense.create({
+        employee_id,
+        amount: parseFloat(amount),
+        date,
+        category,
+        description: description || 'Employee expense',
+        entry_type: 'credit',
+        balance: 0,
+        salary_payment_id: null,
+      }, { transaction });
+
+      const currentBalance = await updateEmployeeBalances(employee_id, transaction);
+
+      await transaction.commit();
+
+      const createdExpense = await EmployeeExpense.findByPk(expense.id, {
+        include: [{ 
+          model: Employee, 
+          as: 'employee',  // ← FIX: Added 'as' keyword
+          attributes: ['id', 'name'] 
+        }]
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Expense created',
+        data: createdExpense,
+        current_balance: currentBalance
+      });
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   } catch (error) {
     console.error('Create expense error:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
@@ -66,12 +169,43 @@ exports.updateExpense = async (req, res) => {
     const expense = await EmployeeExpense.findByPk(id);
     if (!expense) return res.status(404).json({ success: false, message: 'Expense not found' });
 
-    if (expense.status === 'recovered') {
-      return res.status(400).json({ success: false, message: 'Cannot edit a recovered expense' });
+    // Don't allow updating if it's already been recovered
+    if (expense.salary_payment_id) {
+      return res.status(400).json({ success: false, message: 'Cannot edit an expense that has been recovered in a salary payment' });
     }
 
-    await expense.update({ amount, date, category, description: description || null });
-    res.json({ success: true, message: 'Expense updated', data: expense });
+    const transaction = await sequelize.transaction();
+
+    try {
+      await expense.update({
+        amount: amount ? parseFloat(amount) : expense.amount,
+        date: date || expense.date,
+        category: category || expense.category,
+        description: description || expense.description,
+      }, { transaction });
+
+      const currentBalance = await updateEmployeeBalances(expense.employee_id, transaction);
+
+      await transaction.commit();
+
+      const updatedExpense = await EmployeeExpense.findByPk(id, {
+        include: [{ 
+          model: Employee, 
+          as: 'employee',  // ← FIX: Added 'as' keyword
+          attributes: ['id', 'name'] 
+        }]
+      });
+
+      res.json({
+        success: true,
+        message: 'Expense updated',
+        data: updatedExpense,
+        current_balance: currentBalance
+      });
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   } catch (error) {
     console.error('Update expense error:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
@@ -86,12 +220,30 @@ exports.deleteExpense = async (req, res) => {
     const expense = await EmployeeExpense.findByPk(id);
     if (!expense) return res.status(404).json({ success: false, message: 'Expense not found' });
 
-    if (expense.status === 'recovered') {
-      return res.status(400).json({ success: false, message: 'Cannot delete a recovered expense' });
+    // Don't allow deleting if it's already been recovered
+    if (expense.salary_payment_id) {
+      return res.status(400).json({ success: false, message: 'Cannot delete an expense that has been recovered in a salary payment' });
     }
 
-    await expense.destroy();
-    res.json({ success: true, message: 'Expense deleted' });
+    const transaction = await sequelize.transaction();
+
+    try {
+      const employee_id = expense.employee_id;
+      await expense.destroy({ transaction });
+
+      const currentBalance = await updateEmployeeBalances(employee_id, transaction);
+
+      await transaction.commit();
+
+      res.json({
+        success: true,
+        message: 'Expense deleted',
+        current_balance: currentBalance
+      });
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   } catch (error) {
     console.error('Delete expense error:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });

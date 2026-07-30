@@ -12,12 +12,14 @@ module.exports = (sequelize) => {
       defaultValue: 'Other',
     },
     description:       { type: DataTypes.TEXT,            allowNull: true },
-    status:            {
-      type: DataTypes.ENUM('pending', 'recovered'),
+    entry_type:        {
+      type: DataTypes.ENUM('credit', 'debit'),
       allowNull: false,
-      defaultValue: 'pending',
+      defaultValue: 'credit', // Credit means employee owes this amount
     },
+    balance:           { type: DataTypes.DECIMAL(10, 2),  allowNull: false, defaultValue: 0.00 },
     salary_payment_id: { type: DataTypes.INTEGER,        allowNull: true, defaultValue: null },
+    source_entry_id:   { type: DataTypes.INTEGER,        allowNull: true, defaultValue: null }, // ← NEW: links a debit entry back to the credit it recovered
   }, {
     tableName: 'employee_expenses',
     timestamps: true,
