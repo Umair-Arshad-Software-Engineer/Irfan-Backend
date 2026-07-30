@@ -1416,7 +1416,8 @@ exports.recordPayment = async (req, res) => {
         });
       }
 
-      const chequeDescription = notes || '';
+      // const chequeDescription = notes || '';
+      const chequeDescription = `چیک نمبر: ${cheque_number}${notes ? ` - ${notes}` : ''}`;
 
       const cheque = await Cheque.create({
         bank_id: bank_id,

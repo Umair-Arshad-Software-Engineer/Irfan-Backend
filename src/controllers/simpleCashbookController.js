@@ -245,22 +245,46 @@ exports.addManualEntry = async (req, res) => {
       }
     }
 
-    if (payment_method === 'cheque' && cheque_number) {
-      const { Cheque } = require('../models');
-      const cheque = await Cheque.create({
-        cheque_number,
-        cheque_date: cheque_date ? new Date(cheque_date) : null,
-        amount: parseFloat(amount),
-        bank_id: bank_id || null,
-        bank_name: bank_name || null,
-        cheque_type: entry_type === 'cash_in' ? 'received' : 'issued',
-        status: 'pending',
-        description: finalDescription,
-        created_by: req.user?.id,
-      }, { transaction: t });
+    // if (payment_method === 'cheque' && cheque_number) {
+    //   const { Cheque } = require('../models');
+    //   const cheque = await Cheque.create({
+    //     cheque_number,
+    //     cheque_date: cheque_date ? new Date(cheque_date) : null,
+    //     amount: parseFloat(amount),
+    //     bank_id: bank_id || null,
+    //     bank_name: bank_name || null,
+    //     cheque_type: entry_type === 'cash_in' ? 'received' : 'issued',
+    //     status: 'pending',
+    //     description: finalDescription,
+    //     created_by: req.user?.id,
+    //   }, { transaction: t });
 
-      linkedChequeId = cheque.id;
-    }
+    //   linkedChequeId = cheque.id;
+    // }
+    if (payment_method === 'cheque' && cheque_number) {
+        const { Cheque } = require('../models');
+
+        if (!bank_id) {
+          await t.rollback();
+          return res.status(400).json({ success: false, message: 'Bank is required for cheque entries' });
+        }
+
+        const cheque = await Cheque.create({
+          cheque_number,
+          cheque_date: cheque_date ? new Date(cheque_date) : null,
+          issue_date: entry_date ? new Date(entry_date) : new Date(),
+          amount: parseFloat(amount),
+          bank_id,
+          bank_name: bank_name || null,
+          payee_payer_name: description.trim(),
+          cheque_type: entry_type === 'cash_in' ? 'received' : 'issued',
+          status: 'pending',
+          description: finalDescription,
+          created_by: req.user?.id,
+        }, { transaction: t });
+
+        linkedChequeId = cheque.id;
+      }
 
     const entry = await createSimpleCashbookEntry({
       entry_date: entry_date || new Date(),
