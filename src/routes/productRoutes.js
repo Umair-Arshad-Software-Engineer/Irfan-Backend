@@ -16,7 +16,8 @@ router.get('/bom/calculate-cost/:id', productController.calculateBomCost);
 router.post('/bom/:id/build', productController.buildBomProduct);
 router.get('/bom/build-transactions', productController.getBuildTransactions);
 router.delete('/bom/build-transactions/:txId', productController.deleteBuildTransaction);
-
+// productRoutes.js
+router.delete('/bom/:id', productController.deleteBomProduct); // Add this line
 
 // Product CRUD routes with :id parameter (place after specific routes)
 router.get('/:id', productController.getProductById);

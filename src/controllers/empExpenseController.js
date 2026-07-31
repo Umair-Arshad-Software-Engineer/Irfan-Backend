@@ -35,10 +35,10 @@ exports.getExpensesByEmployee = async (req, res) => {
 
     const expenses = await EmployeeExpense.findAll({
       where,
-      include: [{ 
-        model: Employee, 
-        as: 'employee',  // ← FIX: Added 'as' keyword
-        attributes: ['id', 'name'] 
+      include: [{
+        model: Employee,
+        as: 'employee',
+        attributes: ['id', 'name']
       }],
       order: [['date', 'DESC'], ['createdAt', 'DESC']],
     });
@@ -137,10 +137,10 @@ exports.createExpense = async (req, res) => {
       await transaction.commit();
 
       const createdExpense = await EmployeeExpense.findByPk(expense.id, {
-        include: [{ 
-          model: Employee, 
-          as: 'employee',  // ← FIX: Added 'as' keyword
-          attributes: ['id', 'name'] 
+        include: [{
+          model: Employee,
+          as: 'employee',
+          attributes: ['id', 'name']
         }]
       });
 
@@ -169,9 +169,18 @@ exports.updateExpense = async (req, res) => {
     const expense = await EmployeeExpense.findByPk(id);
     if (!expense) return res.status(404).json({ success: false, message: 'Expense not found' });
 
+    // Only credit (employee-owes) entries can be edited
+    if (expense.entry_type !== 'credit') {
+      return res.status(400).json({ success: false, message: 'Only credit entries can be edited' });
+    }
+
     // Don't allow updating if it's already been recovered
     if (expense.salary_payment_id) {
       return res.status(400).json({ success: false, message: 'Cannot edit an expense that has been recovered in a salary payment' });
+    }
+
+    if (amount != null && parseFloat(amount) <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
     }
 
     const transaction = await sequelize.transaction();
@@ -189,10 +198,10 @@ exports.updateExpense = async (req, res) => {
       await transaction.commit();
 
       const updatedExpense = await EmployeeExpense.findByPk(id, {
-        include: [{ 
-          model: Employee, 
-          as: 'employee',  // ← FIX: Added 'as' keyword
-          attributes: ['id', 'name'] 
+        include: [{
+          model: Employee,
+          as: 'employee',
+          attributes: ['id', 'name']
         }]
       });
 
@@ -220,6 +229,11 @@ exports.deleteExpense = async (req, res) => {
     const expense = await EmployeeExpense.findByPk(id);
     if (!expense) return res.status(404).json({ success: false, message: 'Expense not found' });
 
+    // Only credit (employee-owes) entries can be deleted
+    if (expense.entry_type !== 'credit') {
+      return res.status(400).json({ success: false, message: 'Only credit entries can be deleted' });
+    }
+
     // Don't allow deleting if it's already been recovered
     if (expense.salary_payment_id) {
       return res.status(400).json({ success: false, message: 'Cannot delete an expense that has been recovered in a salary payment' });
@@ -231,6 +245,7 @@ exports.deleteExpense = async (req, res) => {
       const employee_id = expense.employee_id;
       await expense.destroy({ transaction });
 
+      // Fully recalculates every remaining entry's balance from scratch, in date/createdAt order
       const currentBalance = await updateEmployeeBalances(employee_id, transaction);
 
       await transaction.commit();

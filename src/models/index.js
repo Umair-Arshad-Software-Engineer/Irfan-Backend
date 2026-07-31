@@ -34,6 +34,7 @@ const initSalaryPayment = require('./SalaryPayment');
 const initAdvancePayment = require('./AdvancePayment');
 const initEmployeeExpense = require('./EmployeeExpense');
 const initContractWorkEntry = require('./ContractWorkEntry');
+const initBuildTransaction = require('./BuildTransaction'); // ← ADD THIS
 
 const Category = initCategory(sequelize);
 const Subcategory = initSubcategory(sequelize);
@@ -66,6 +67,7 @@ const SalaryPayment = initSalaryPayment(sequelize);
 const AdvancePayment = initAdvancePayment(sequelize);
 const EmployeeExpense = initEmployeeExpense(sequelize);
 const ContractWorkEntry = initContractWorkEntry(sequelize);
+const BuildTransaction = initBuildTransaction(sequelize); // ← ADD THIS
 
 // ── Associations ─────────────────────────────────────────────────────────────
 
@@ -215,6 +217,20 @@ Employee.hasMany(EmployeeExpense, {
   as: 'allExpenses' 
 });
 
+// ── BuildTransaction associations ────────────────────────────────────────────
+// BuildTransaction belongs to Product (the BOM product)
+BuildTransaction.belongsTo(Product, { 
+  foreignKey: 'product_id', 
+  as: 'product' 
+});
+
+// Product has many BuildTransactions
+Product.hasMany(BuildTransaction, { 
+  foreignKey: 'product_id', 
+  as: 'buildTransactions', 
+  onDelete: 'CASCADE' 
+});
+
 // Cashbook / SimpleCashbook — standalone, no FK associations
 
 module.exports = {
@@ -264,4 +280,7 @@ module.exports = {
   AdvancePayment,
   EmployeeExpense,
   ContractWorkEntry,
+  
+  // BOM
+  BuildTransaction, // ← ADD THIS
 };

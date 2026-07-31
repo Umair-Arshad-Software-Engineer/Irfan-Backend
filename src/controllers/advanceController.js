@@ -4,7 +4,6 @@ const { AdvancePayment, Employee, sequelize } = require('../models');
 
 // ── Helper: Update employee balances ─────────────────────────────────────────
 async function updateEmployeeBalances(employee_id, transaction = null) {
-  // Get all entries for this employee ordered by date
   const advances = await AdvancePayment.findAll({
     where: { employee_id },
     order: [['date', 'ASC'], ['createdAt', 'ASC']],
@@ -37,7 +36,7 @@ exports.getAdvancesByEmployee = async (req, res) => {
       where,
       include: [{ 
         model: Employee, 
-        as: 'employee',  // ← FIX: Added 'as' keyword
+        as: 'employee',
         attributes: ['id', 'name'] 
       }],
       order: [['date', 'DESC'], ['createdAt', 'DESC']],
@@ -106,7 +105,6 @@ exports.createAdvance = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
     }
 
-    // ← FIX: sequelize is now imported from models
     const transaction = await sequelize.transaction();
 
     try {
@@ -127,7 +125,7 @@ exports.createAdvance = async (req, res) => {
       const createdAdvance = await AdvancePayment.findByPk(advance.id, {
         include: [{ 
           model: Employee, 
-          as: 'employee',  // ← FIX: Added 'as' keyword
+          as: 'employee',
           attributes: ['id', 'name'] 
         }]
       });
@@ -157,9 +155,18 @@ exports.updateAdvance = async (req, res) => {
     const advance = await AdvancePayment.findByPk(id);
     if (!advance) return res.status(404).json({ success: false, message: 'Advance not found' });
 
+    // Only credit (employee-owes) entries can be edited
+    if (advance.entry_type !== 'credit') {
+      return res.status(400).json({ success: false, message: 'Only credit entries can be edited' });
+    }
+
     // Don't allow updating if it's already been recovered
     if (advance.salary_payment_id) {
       return res.status(400).json({ success: false, message: 'Cannot edit an advance that has been recovered in a salary payment' });
+    }
+
+    if (amount != null && parseFloat(amount) <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
     }
 
     const transaction = await sequelize.transaction();
@@ -178,7 +185,7 @@ exports.updateAdvance = async (req, res) => {
       const updatedAdvance = await AdvancePayment.findByPk(id, {
         include: [{ 
           model: Employee, 
-          as: 'employee',  // ← FIX: Added 'as' keyword
+          as: 'employee',
           attributes: ['id', 'name'] 
         }]
       });
@@ -207,6 +214,11 @@ exports.deleteAdvance = async (req, res) => {
     const advance = await AdvancePayment.findByPk(id);
     if (!advance) return res.status(404).json({ success: false, message: 'Advance not found' });
 
+    // Only credit (employee-owes) entries can be deleted
+    if (advance.entry_type !== 'credit') {
+      return res.status(400).json({ success: false, message: 'Only credit entries can be deleted' });
+    }
+
     // Don't allow deleting if it's already been recovered
     if (advance.salary_payment_id) {
       return res.status(400).json({ success: false, message: 'Cannot delete an advance that has been recovered in a salary payment' });
@@ -218,6 +230,7 @@ exports.deleteAdvance = async (req, res) => {
       const employee_id = advance.employee_id;
       await advance.destroy({ transaction });
 
+      // Fully recalculates every remaining entry's balance from scratch, in date/createdAt order
       const currentBalance = await updateEmployeeBalances(employee_id, transaction);
 
       await transaction.commit();

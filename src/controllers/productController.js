@@ -1,5 +1,7 @@
 // controllers/productController.js
 const { Op } = require('sequelize');
+const { sequelize } = require('../models'); // ← ADD THIS LINE
+
 const {
   Product,
   Supplier,
@@ -13,6 +15,7 @@ const {
   PurchaseReceipt,
   PurchaseReceiptItem,
   PurchaseOrder,
+  BuildTransaction,
 } = require('../models');
 
 
@@ -330,6 +333,9 @@ function normaliseBomComponents(rawComponents, productId = null) {
       const total_cost = parseFloat(comp.totalCost || comp.total_cost) || (cost_per_unit * quantity);
       const notes = comp.notes || null;
       
+      // Log for debugging
+      console.log(`Processing component: ${product_name} (${product_id}) - Quantity: ${quantity}`);
+      
       // Allow negative quantities (for byproducts/wastage), but ensure product exists
       // Only filter out if quantity is zero or product_id/name missing
       if (!product_id || !product_name || quantity === 0) {
@@ -350,6 +356,7 @@ function normaliseBomComponents(rawComponents, productId = null) {
     })
     .filter(comp => comp !== null); // Remove invalid components
   
+  console.log(`Normalized ${validatedComponents.length} BOM components`);
   return validatedComponents.length > 0 ? validatedComponents : null;
 }
 
@@ -1053,57 +1060,213 @@ exports.buildBomProduct = async (req, res) => {
   }
 };
 
+exports.deleteBuildTransaction = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { txId } = req.params;
+    
+    // Find the build transaction
+    const tx = await BuildTransaction.findByPk(txId, { transaction: t });
+    if (!tx) {
+      await t.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Build transaction not found' 
+      });
+    }
+    
+    if (tx.is_deleted) {
+      await t.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Transaction already deleted' 
+      });
+    }
+
+    // Get components used
+    const componentsUsed = tx.components_used || [];
+    
+    // Revert stock for the BOM product
+    const bomProduct = await Product.findByPk(tx.product_id, { transaction: t });
+    if (bomProduct) {
+      const newPhysicalQty = bomProduct.physical_qty - tx.quantity_built;
+      if (newPhysicalQty < 0) {
+        await t.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Cannot revert: ${bomProduct.item_name} has insufficient stock (${bomProduct.physical_qty} available, need ${tx.quantity_built})`,
+        });
+      }
+      
+      await bomProduct.update({
+        physical_qty: newPhysicalQty,
+        available_qty: newPhysicalQty,
+      }, { transaction: t });
+    }
+
+    // Revert stock for each component
+    for (const comp of componentsUsed) {
+      const componentProduct = await Product.findByPk(comp.product_id, { transaction: t });
+      if (componentProduct) {
+        const newPhysicalQty = componentProduct.physical_qty + comp.quantity_used;
+        await componentProduct.update({
+          physical_qty: newPhysicalQty,
+          available_qty: newPhysicalQty,
+        }, { transaction: t });
+      }
+    }
+
+    // Mark as deleted
+    await tx.update({ 
+      is_deleted: true 
+    }, { transaction: t });
+
+    await t.commit();
+
+    res.json({
+      success: true,
+      message: 'Build transaction deleted and stock restored successfully',
+      data: {
+        transaction_id: tx.id,
+        product_name: tx.product_name,
+        quantity_built: tx.quantity_built,
+        components_restored: componentsUsed.length,
+      },
+    });
+  } catch (error) {
+    await t.rollback();
+    console.error('Delete build transaction error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error', 
+      error: error.message 
+    });
+  }
+};
+
+// Get all build transactions with pagination and filters
 exports.getBuildTransactions = async (req, res) => {
   try {
-    const { search, from_date, to_date, page = 1, limit = 30 } = req.query;
-    const where = { is_deleted: false };
-    if (search) where.product_name = { [Op.like]: `%${search}%` };
-    if (from_date && to_date) where.build_date = { [Op.between]: [from_date, to_date] };
+    const { 
+      search, 
+      from_date, 
+      to_date, 
+      page = 1, 
+      limit = 30,
+      show_deleted = false
+    } = req.query;
+    
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = (pageNum - 1) * limitNum;
+    
+    const where = {};
+    
+    if (!show_deleted || show_deleted === 'false') {
+      where.is_deleted = false;
+    }
+    
+    if (search) {
+      where[Op.or] = [
+        { product_name: { [Op.like]: `%${search}%` } },
+        { notes: { [Op.like]: `%${search}%` } },
+      ];
+    }
+    
+    if (from_date && to_date) {
+      where.build_date = { [Op.between]: [from_date, to_date] };
+    }
 
     const { count, rows } = await BuildTransaction.findAndCountAll({
       where,
+      include: [
+        {
+          model: Product,
+          as: 'product',
+          attributes: ['id', 'item_name', 'physical_qty', 'available_qty'],
+          required: false,
+        }
+      ],
       order: [['build_date', 'DESC'], ['created_at', 'DESC']],
-      limit: parseInt(limit),
-      offset: (parseInt(page) - 1) * parseInt(limit),
+      limit: limitNum,
+      offset,
     });
+
+    // Calculate summary
+    const totalAmount = rows.reduce((sum, tx) => sum + parseFloat(tx.build_amount || 0), 0);
+    const totalQuantity = rows.reduce((sum, tx) => sum + parseFloat(tx.quantity_built || 0), 0);
 
     res.json({
       success: true,
       data: rows,
-      pagination: { total: count, page: parseInt(page), limit: parseInt(limit) },
+      pagination: {
+        total: count,
+        page: pageNum,
+        limit: limitNum,
+        pages: Math.ceil(count / limitNum),
+      },
+      summary: {
+        total_transactions: count,
+        total_quantity_built: totalQuantity,
+        total_build_amount: totalAmount,
+      },
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Get build transactions error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 };
 
-exports.deleteBuildTransaction = async (req, res) => {
+// Add this to productController.js
+exports.deleteBomProduct = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const tx = await BuildTransaction.findByPk(req.params.txId, { transaction: t });
-    if (!tx) { await t.rollback(); return res.status(404).json({ success: false, message: 'Not found' }); }
-
-    // Revert stock
-    const bomProduct = await Product.findByPk(tx.product_id, { transaction: t });
-    if (bomProduct) {
-      await bomProduct.update({
-        physical_qty:  bomProduct.physical_qty  - tx.quantity_built,
-        available_qty: bomProduct.available_qty - tx.quantity_built,
-      }, { transaction: t });
+    const { id } = req.params;
+    
+    const product = await Product.findByPk(id, { transaction: t });
+    if (!product) {
+      await t.rollback();
+      return res.status(404).json({ success: false, message: 'Product not found' });
     }
-    for (const comp of (tx.components_used || [])) {
-      const p = await Product.findByPk(comp.product_id, { transaction: t });
-      if (p) await p.update({
-        physical_qty:  p.physical_qty  + comp.quantity_used,
-        available_qty: p.available_qty + comp.quantity_used,
-      }, { transaction: t });
+    
+    if (!product.is_bom) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: 'Product is not a BOM product' });
     }
-
-    await tx.update({ is_deleted: true }, { transaction: t });
+    
+    // Reverse component stock
+    if (product.bom_components && product.bom_components.length > 0) {
+      for (const comp of product.bom_components) {
+        // Only reverse positive quantities (materials)
+        if (comp.quantity > 0) {
+          const componentProduct = await Product.findByPk(comp.product_id, { transaction: t });
+          if (componentProduct) {
+            await componentProduct.update({
+              physical_qty: componentProduct.physical_qty + comp.quantity,
+              available_qty: componentProduct.available_qty + comp.quantity,
+            }, { transaction: t });
+          }
+        }
+        // For negative quantities (byproducts/wastage), we skip
+      }
+    }
+    
+    // Delete the product
+    await product.destroy({ transaction: t });
+    
     await t.commit();
-    res.json({ success: true, message: 'Build transaction deleted and stock reverted' });
+    
+    res.json({
+      success: true,
+      message: 'BOM product deleted and stock reverted successfully',
+    });
   } catch (error) {
     await t.rollback();
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Delete BOM product error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };
