@@ -226,20 +226,29 @@ const responseData = {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ✅ GET SUPPLIER PAYMENTS
+// ✅ GET SUPPLIER PAYMENTS (now includes manual entries too)
 // ═══════════════════════════════════════════════════════════════════════════
 exports.getSupplierPayments = async (req, res) => {
   try {
     const { supplierId } = req.params;
     const { payment_method, from, to, page = 1, limit = 50 } = req.query;
 
+    // Base filter: 'payment' entries + 'manual' entries are both shown here
     const where = {
       supplier_id: supplierId,
-      reference_type: 'payment',
+      reference_type: { [Op.in]: ['payment', 'manual'] },
     };
 
     if (payment_method && payment_method !== 'all') {
-      where.payment_method = payment_method;
+      if (payment_method === 'manual') {
+        // Manual entries never have a payment_method set (null)
+        where.reference_type = 'manual';
+        where.payment_method = { [Op.is]: null };
+      } else {
+        // Restrict to actual payment entries with this method
+        where.reference_type = 'payment';
+        where.payment_method = payment_method;
+      }
     }
 
     if (from || to) {
@@ -288,7 +297,7 @@ exports.getSupplierPayments = async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ✅ DELETE SUPPLIER PAYMENT - Delete from everywhere
+// ✅ DELETE SUPPLIER PAYMENT - Delete from everywhere (now supports manual too)
 // ═══════════════════════════════════════════════════════════════════════════
 exports.deleteSupplierPayment = async (req, res) => {
   const dbTransaction = await sequelize.transaction();
@@ -301,7 +310,7 @@ exports.deleteSupplierPayment = async (req, res) => {
       where: {
         id: paymentId,
         supplier_id: supplierId,
-        reference_type: 'payment'
+        reference_type: { [Op.in]: ['payment', 'manual'] },
       },
       transaction: dbTransaction
     });
