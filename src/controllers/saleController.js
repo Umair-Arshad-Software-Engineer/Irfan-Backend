@@ -230,15 +230,26 @@ exports.getAllSales = async (req, res) => {
       saleJson.customer_balance = parseFloat(sale.customer?.balance ?? 0);
 
       // ── NEW: Build payment_details from CustomerLedger payment entries ──
+      // const paymentEntries = await CustomerLedger.findAll({
+      //   where: {
+      //     customer_id: sale.customer_id,
+      //     reference_id: sale.id,
+      //     transaction_type: 'payment',
+      //   },
+      //   order: [['id', 'ASC']],
+      // });
       const paymentEntries = await CustomerLedger.findAll({
         where: {
           customer_id: sale.customer_id,
           reference_id: sale.id,
           transaction_type: 'payment',
+          [Op.or]: [
+            { payment_method: { [Op.ne]: 'cheque' } },
+            { payment_method: 'cheque', cheque_cleared: true },
+          ],
         },
         order: [['id', 'ASC']],
       });
-
       // if (paymentEntries.length > 0) {
       //   const paymentDetails = {};
       //   for (const entry of paymentEntries) {
@@ -367,44 +378,18 @@ exports.getSaleById = async (req, res) => {
     const saleJson = sale.toJSON();
 
     // Build payment_details from ledger entries
-    // if (sale.customer_id) {
-    //   const paymentEntries = await CustomerLedger.findAll({
-    //     where: {
-    //       customer_id: sale.customer_id,
-    //       reference_id: sale.id,
-    //       transaction_type: 'payment',
-    //     },
-    //     order: [['id', 'ASC']],
-    //   });
-
-    //   if (paymentEntries.length > 0) {
-    //     const paymentDetails = {};
-    //     for (const entry of paymentEntries) {
-    //       const method = (entry.payment_method || 'cash').toLowerCase();
-    //       const amount = parseFloat(entry.debit) || 0;
-    //       if (amount > 0) {
-    //         paymentDetails[method] = (paymentDetails[method] || 0) + amount;
-    //       }
-    //     }
-    //     saleJson.payment_details = paymentDetails;
-    //   } else {
-    //     const method = (sale.payment_method || 'cash').toLowerCase();
-    //     const paid = parseFloat(sale.amount_paid) || 0;
-    //     saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
-    //   }
-    // } else {
-    //   // No customer — use payment_method directly
-    //   const method = (sale.payment_method || 'cash').toLowerCase();
-    //   const paid = parseFloat(sale.amount_paid) || 0;
-    //   saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
-    // }
-    // Build payment_details from ledger entries
     if (sale.customer_id) {
+      // ✅ FIX: same cheque-clearing filter as getAllSales — hide
+      // uncleared cheque payments from the visible payment methods list.
       const paymentEntries = await CustomerLedger.findAll({
         where: {
           customer_id: sale.customer_id,
           reference_id: sale.id,
           transaction_type: 'payment',
+          [Op.or]: [
+            { payment_method: { [Op.ne]: 'cheque' } },
+            { payment_method: 'cheque', cheque_cleared: true },
+          ],
         },
         order: [['id', 'ASC']],
       });
@@ -442,7 +427,6 @@ exports.getSaleById = async (req, res) => {
           : [];
       }
     } else {
-      // No customer — use payment_method directly
       const method = (sale.payment_method || 'cash').toLowerCase();
       const paid = parseFloat(sale.amount_paid) || 0;
       saleJson.payment_details = paid > 0
@@ -1331,311 +1315,6 @@ exports.getDailySummary = async (req, res) => {
   }
 };
 
-// exports.recordPayment = async (req, res) => {
-//   const t = await sequelize.transaction();
-//   try {
-//     const { id } = req.params;
-//     const { 
-//       amount, 
-//       payment_method: rawPaymentMethod, 
-//       payment_date, 
-//       notes, 
-//       cheque_number, 
-//       bank_name,
-//       bank_id,
-//       cheque_date,
-//       cheque_id,
-//       slip_number,      // ✅ NEW — was accepted on the Flutter side but never read here
-//       slip_date,
-//       from_simple_cashbook,
-//     } = req.body;
-
-//     if (!amount || parseFloat(amount) <= 0) {
-//       await t.rollback();
-//       return res.status(400).json({ success: false, message: 'Valid amount is required' });
-//     }
-
-//     const payment_method = normalizePaymentMethod(rawPaymentMethod);
-//     const paymentAmount = parseFloat(amount);
-
-//     const sale = await Sale.findByPk(id, {
-//       include: [{ model: Customer, as: 'customer' }],
-//       transaction: t
-//     });
-
-//     if (!sale) { 
-//       await t.rollback(); 
-//       return res.status(404).json({ success: false, message: 'Sale not found' }); 
-//     }
-//     if (sale.payment_status === 'paid') { 
-//       await t.rollback(); 
-//       return res.status(400).json({ success: false, message: 'Sale is already fully paid' }); 
-//     }
-
-//     // Calculate outstanding and overpayment
-//     const outstandingBalance = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
-//     let amountToApply = paymentAmount;
-//     let overpaymentAmount = 0;
-    
-//     if (paymentAmount > outstandingBalance) {
-//       amountToApply = outstandingBalance;
-//       overpaymentAmount = paymentAmount - outstandingBalance;
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 1: Validate bank for bank/cheque/slip payments
-//     // ✅ FIX: 'slip' now also validates + loads the bank, same as 'bank' and
-//     // 'cheque'. Previously only ('bank' || 'cheque') looked up the bank here,
-//     // so a slip payment with a bank_id silently had no bank record attached.
-//     // ═══════════════════════════════════════════════════════════════════════
-//     let selectedBank = null;
-//     if ((payment_method === 'bank' || payment_method === 'cheque' || payment_method === 'slip') && bank_id) {
-//       selectedBank = await Bank.findByPk(bank_id, { transaction: t });
-      
-//       if (!selectedBank) {
-//         await t.rollback();
-//         return res.status(404).json({
-//           success: false,
-//           message: 'Selected bank not found'
-//         });
-//       }
-//     }
-
-//     const customerName = sale.customer?.name || 'کسٹمر';
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 2: Create Cheque Record (if payment method is cheque)
-//     // ═══════════════════════════════════════════════════════════════════════
-//     let chequeId = null;
-//     if (payment_method === 'cheque') {
-//       if (!cheque_number) {
-//         await t.rollback();
-//         return res.status(400).json({
-//           success: false,
-//           message: 'Cheque number is required for cheque payment'
-//         });
-//       }
-
-//       const chequeDescription = notes || '';
-
-//       const cheque = await Cheque.create({
-//         bank_id: bank_id,
-//         cheque_number: cheque_number,
-//         cheque_type: 'received',
-//         amount: paymentAmount,
-//         payee_payer_name: customerName,
-//         description: chequeDescription,
-//         issue_date: payment_date ? new Date(payment_date) : new Date(),
-//         due_date: cheque_date ? new Date(cheque_date) : null,
-//         status: 'pending',
-//         created_by: req.user?.id,
-//       }, { transaction: t });
-
-//       chequeId = cheque.id;
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 3: Record Bank Transaction (if bank OR slip payment — money comes IN)
-//     // ✅ FIX: previously this block only ran for payment_method === 'bank',
-//     // so 'slip' payments never touched Bank.balance or created a
-//     // BankTransaction row, even though addManualEntry() does this correctly
-//     // for slip. Now both 'bank' and 'slip' hit this block. Cheque still does
-//     // NOT move bank balance here — money isn't actually in the bank until
-//     // the cheque clears (handled elsewhere, e.g. a cheque-clearing endpoint).
-//     // ═══════════════════════════════════════════════════════════════════════
-//     let bankTransaction = null;
-//     if (selectedBank && (payment_method === 'bank' || payment_method === 'slip')) {
-//       const currentBalance = parseFloat(selectedBank.balance);
-//       const newBalance = currentBalance + paymentAmount;
-
-//       await selectedBank.update(
-//         { balance: newBalance.toFixed(2) },
-//         { transaction: t }
-//       );
-
-//       const bankDescription = notes || '';
-
-//       bankTransaction = await BankTransaction.create({
-//         bank_id: bank_id,
-//         transaction_type: 'in',
-//         amount: paymentAmount.toFixed(2),
-//         description: bankDescription,
-//         // ✅ FIX: for slip payments, prefer the slip_number as the reference
-//         // (matches the convention used in addManualEntry), falling back to
-//         // the sale reference/invoice number.
-//         reference_number: (payment_method === 'slip' && slip_number)
-//           ? slip_number
-//           : (sale.reference || sale.invoice_number),
-//         balance_after: newBalance.toFixed(2),
-//         created_by: req.user?.id,
-//         transaction_date: payment_date ? new Date(payment_date) : new Date()
-//       }, { transaction: t });
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 4: Update sale payment info
-//     // ═══════════════════════════════════════════════════════════════════════
-//     const newPaid = Math.min(
-//       parseFloat(sale.amount_paid) + paymentAmount,
-//       parseFloat(sale.grand_total)
-//     );
-//     const newStatus = newPaid >= parseFloat(sale.grand_total) ? 'paid' : 'partial';
-
-//     const methodLabels = {
-//       cash: 'نقد',
-//       bank: 'بینک ٹرانسفر',
-//       cheque: 'چیک',
-//       slip: 'سلیپ',
-//       credit: 'کریڈٹ'
-//     };
-    
-//     const methodLabel = methodLabels[payment_method] || payment_method;
-
-//     const paymentNotes = notes || '';
-
-//     await sale.update({
-//       amount_paid: newPaid,
-//       payment_status: newStatus,
-//       payment_method: payment_method || sale.payment_method,
-//       notes: paymentNotes ? (sale.notes ? `${sale.notes}\n${paymentNotes}` : paymentNotes) : sale.notes,
-//     }, { transaction: t });
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 5: Update cheque with sale_id reference
-//     // ═══════════════════════════════════════════════════════════════════════
-//     if (chequeId) {
-//       await Cheque.update(
-//         {
-//           sale_id: sale.id,
-//           customer_id: sale.customer_id,
-//         },
-//         { where: { id: chequeId }, transaction: t }
-//       );
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 6: Create customer ledger entry for FULL payment amount
-//     // ═══════════════════════════════════════════════════════════════════════
-//     if (sale.customer_id) {
-//       const ledgerDescription = paymentNotes || '';
-
-//       await createLedgerEntry({
-//         customerId: sale.customer_id,
-//         date: payment_date || new Date(),
-//         transactionType: 'payment',
-//         referenceId: sale.id,
-//         referenceNumber: sale.reference || sale.invoice_number,
-//         description: ledgerDescription,
-//         debit: paymentAmount,
-//         credit: 0,
-//         transaction: t,
-//         paymentMethod: payment_method,
-//         bankName: selectedBank?.name || bank_name || null,
-//         bankId: bank_id || null,
-//         chequeNumber: cheque_number || null,
-//         chequeDate: cheque_date ? new Date(cheque_date) : null,
-//       });
-
-//       const finalBalance = await getCustomerBalance(sale.customer_id, t);
-//       await Customer.update({ balance: finalBalance }, { where: { id: sale.customer_id }, transaction: t });
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 7: Cashbook entries
-//     // ✅ FIX: capture the legacy cashbook entry's id (legacyCashbookEntryId)
-//     // so it can be linked into the SimpleCashbook row below. This lets
-//     // updateEntryDescription() propagate description edits into the legacy
-//     // cashbook too, the same way it already does for bank_transaction_id
-//     // and cheque_id.
-//     //
-//     // NOTE: this assumes createCashbookEntry(...) returns the created row
-//     // (or an object with an `.id`). If your cashbookController's
-//     // createCashbookEntry doesn't return anything, update it to `return
-//     // entry;` at the end so this linkage works. The `?.id` guard below
-//     // means nothing breaks even if it still returns undefined — the link
-//     // just won't be set.
-//     // ═══════════════════════════════════════════════════════════════════════
-//     let legacyCashbookEntryId = null;
-
-//     if (payment_method === 'cash' && sale.customer_id) {
-//       const legacyEntry = await createCashbookEntry({
-//         entry_date: payment_date || new Date(),
-//         entry_type: 'cash_in',
-//         source_type: 'customer_payment',
-//         reference_id: sale.id,
-//         reference_number: sale.reference || sale.invoice_number,
-//         description: paymentNotes,
-//         amount: paymentAmount,
-//         created_by: req.user?.id,
-//         transaction: t,
-//       });
-//       legacyCashbookEntryId = legacyEntry?.id || null;
-//     }
-
-//     // Simple cashbook
-//     if (from_simple_cashbook) {
-//       await createSimpleCashbookEntry({
-//         entry_date: payment_date || new Date(),
-//         entry_type: 'cash_in',
-//         source_type: 'customer_payment',
-//         reference_id: sale.id,
-//         reference_number: (payment_method === 'slip' && slip_number)
-//           ? slip_number
-//           : (sale.reference || sale.invoice_number),
-//         description: paymentNotes,
-//         amount: paymentAmount,
-//         bank_transaction_id: bankTransaction?.id || null,
-//         cheque_id: chequeId || null,
-//         legacy_cashbook_id: legacyCashbookEntryId,   // ✅ NEW
-//         created_by: req.user?.id,
-//         transaction: t,
-//       });
-//     }
-
-//     await t.commit();
-
-//     const updated = await Sale.findByPk(id, {
-//       include: [{ model: Customer, as: 'customer', attributes: ['id', 'name', 'balance'] }],
-//     });
-
-//     let successMessage = 'ادائیگی کامیابی سے ریکارڈ ہوگئی';
-    
-//     if (overpaymentAmount > 0) {
-//       successMessage = `ادائیگی ${paymentAmount} ریکارڈ ہوگئی۔ (${amountToApply} لاگو ہوا، ${overpaymentAmount} زیادہ ادائیگی)`;
-//     } else if (payment_method === 'cheque' && cheque_number) {
-//       successMessage = `چیک #${cheque_number} ریکارڈ ہوگیا۔ حیثیت: زیر التواء (کلئرنگ کا انتظار)`;
-//     } else if (payment_method === 'bank' && selectedBank) {
-//       successMessage = `${selectedBank.name} میں بینک ٹرانسفر ریکارڈ ہوگیا۔ ${selectedBank.name} کا بیلنس Rs ${paymentAmount.toFixed(2)} بڑھ گیا`;
-//     } else if (payment_method === 'cash') {
-//       successMessage = `نقد ادائیگی Rs ${paymentAmount.toFixed(2)} کامیابی سے ریکارڈ ہوگئی`;
-//     } else if (payment_method === 'slip' && selectedBank) {
-//       successMessage = `سلیپ کے ذریعے ${selectedBank.name} میں Rs ${paymentAmount.toFixed(2)} جمع ہوگئی`;
-//     } else if (payment_method === 'slip') {
-//       successMessage = `سلیپ کے ذریعے ادائیگی Rs ${paymentAmount.toFixed(2)} کامیابی سے ریکارڈ ہوگئی`;
-//     }
-
-//     res.json({ 
-//       success: true, 
-//       message: successMessage,
-//       data: {
-//         sale: updated,
-//         cheque_id: chequeId,
-//         bank_transaction: bankTransaction,
-//         overpayment: overpaymentAmount,
-//         applied_amount: Math.min(paymentAmount, outstandingBalance)
-//       }
-//     });
-//   } catch (error) {
-//     await t.rollback();
-//     console.error('Record payment error:', error);
-//     res.status(500).json({ 
-//       success: false, 
-//       message: 'سرور کی خرابی', 
-//       error: error.message 
-//     });
-//   }
-// };
-
 
 
 exports.recordPayment = async (req, res) => {
@@ -1646,7 +1325,7 @@ exports.recordPayment = async (req, res) => {
       amount, 
       payment_method: rawPaymentMethod, 
       payment_date, 
-      notes, 
+      notes,  // ← This is the correct variable name from the request body
       cheque_number, 
       bank_name,
       bank_id,
@@ -1720,7 +1399,6 @@ exports.recordPayment = async (req, res) => {
         });
       }
 
-      // ✅ FIX: Include cheque number in description
       const chequeDescription = notes 
         ? `${notes} (چیک نمبر: ${cheque_number})` 
         : `چیک نمبر: ${cheque_number}`;
@@ -1754,14 +1432,7 @@ exports.recordPayment = async (req, res) => {
         { transaction: t }
       );
 
-      // ✅ FIX: Include cheque number in bank description for cheque payments
-      // (Note: This block currently only runs for bank/slip, not cheque)
       let bankDescription = notes || '';
-      if (payment_method === 'cheque' && cheque_number) {
-        bankDescription = notes 
-          ? `${notes} (چیک نمبر: ${cheque_number})` 
-          : `چیک نمبر: ${cheque_number}`;
-      }
 
       bankTransaction = await BankTransaction.create({
         bank_id: bank_id,
@@ -1780,35 +1451,23 @@ exports.recordPayment = async (req, res) => {
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 4: Update sale payment info
     // ═══════════════════════════════════════════════════════════════════════
-    const newPaid = Math.min(
-      parseFloat(sale.amount_paid) + paymentAmount,
-      parseFloat(sale.grand_total)
-    );
-    const newStatus = newPaid >= parseFloat(sale.grand_total) ? 'paid' : 'partial';
+    let newPaid = parseFloat(sale.amount_paid);
+    let newStatus = sale.payment_status;
 
-    const methodLabels = {
-      cash: 'نقد',
-      bank: 'بینک ٹرانسفر',
-      cheque: 'چیک',
-      slip: 'سلیپ',
-      credit: 'کریڈٹ'
-    };
-    
-    const methodLabel = methodLabels[payment_method] || payment_method;
-
-    // ✅ FIX: Include cheque number in sale notes if cheque payment
-    let paymentNotes = notes || '';
-    if (payment_method === 'cheque' && cheque_number) {
-      paymentNotes = notes 
-        ? `${notes} (چیک نمبر: ${cheque_number})` 
-        : `چیک نمبر: ${cheque_number}`;
+    if (payment_method !== 'cheque') {
+      newPaid = Math.min(
+        parseFloat(sale.amount_paid) + paymentAmount,
+        parseFloat(sale.grand_total)
+      );
+      newStatus = newPaid >= parseFloat(sale.grand_total) ? 'paid' : 'partial';
     }
 
+    // ✅ FIXED: Use `notes` instead of `paymentNotes`
     await sale.update({
       amount_paid: newPaid,
       payment_status: newStatus,
       payment_method: payment_method || sale.payment_method,
-      notes: paymentNotes ? (sale.notes ? `${sale.notes}\n${paymentNotes}` : paymentNotes) : sale.notes,
+      notes: notes ? (sale.notes ? `${sale.notes}\n${notes}` : notes) : sale.notes,
     }, { transaction: t });
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1828,8 +1487,7 @@ exports.recordPayment = async (req, res) => {
     // STEP 6: Create customer ledger entry for FULL payment amount
     // ═══════════════════════════════════════════════════════════════════════
     if (sale.customer_id) {
-      // ✅ FIX: Include cheque number in ledger description
-      let ledgerDescription = paymentNotes || '';
+      let ledgerDescription = notes || '';
       if (payment_method === 'cheque' && cheque_number) {
         ledgerDescription = notes 
           ? `${notes} (چیک نمبر: ${cheque_number})` 
@@ -1869,7 +1527,7 @@ exports.recordPayment = async (req, res) => {
         source_type: 'customer_payment',
         reference_id: sale.id,
         reference_number: sale.reference || sale.invoice_number,
-        description: paymentNotes,
+        description: notes,
         amount: paymentAmount,
         created_by: req.user?.id,
         transaction: t,
@@ -1887,7 +1545,7 @@ exports.recordPayment = async (req, res) => {
         reference_number: (payment_method === 'slip' && slip_number)
           ? slip_number
           : (sale.reference || sale.invoice_number),
-        description: paymentNotes,
+        description: notes,
         amount: paymentAmount,
         bank_transaction_id: bankTransaction?.id || null,
         cheque_id: chequeId || null,
@@ -1940,307 +1598,6 @@ exports.recordPayment = async (req, res) => {
     });
   }
 };
-
-// exports.recordPayment = async (req, res) => {
-//   const t = await sequelize.transaction();
-//   try {
-//     const { id } = req.params;
-//     const { 
-//       amount, 
-//       payment_method: rawPaymentMethod, 
-//       payment_date, 
-//       notes, 
-//       cheque_number, 
-//       bank_name,
-//       bank_id,
-//       cheque_date,
-//       cheque_id,
-//       slip_date,
-//       from_simple_cashbook,
-//     } = req.body;
-
-//     if (!amount || parseFloat(amount) <= 0) {
-//       await t.rollback();
-//       return res.status(400).json({ success: false, message: 'Valid amount is required' });
-//     }
-
-//     const payment_method = normalizePaymentMethod(rawPaymentMethod);
-//     const paymentAmount = parseFloat(amount);
-
-//     const sale = await Sale.findByPk(id, {
-//       include: [{ model: Customer, as: 'customer' }],
-//       transaction: t
-//     });
-
-//     if (!sale) { 
-//       await t.rollback(); 
-//       return res.status(404).json({ success: false, message: 'Sale not found' }); 
-//     }
-//     if (sale.payment_status === 'paid') { 
-//       await t.rollback(); 
-//       return res.status(400).json({ success: false, message: 'Sale is already fully paid' }); 
-//     }
-
-//     // Calculate outstanding and overpayment
-//     const outstandingBalance = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
-//     let amountToApply = paymentAmount;
-//     let overpaymentAmount = 0;
-    
-//     if (paymentAmount > outstandingBalance) {
-//       amountToApply = outstandingBalance;
-//       overpaymentAmount = paymentAmount - outstandingBalance;
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 1: Validate bank for bank/cheque payments
-//     // ═══════════════════════════════════════════════════════════════════════
-//     let selectedBank = null;
-//     if ((payment_method === 'bank' || payment_method === 'cheque') && bank_id) {
-//       selectedBank = await Bank.findByPk(bank_id, { transaction: t });
-      
-//       if (!selectedBank) {
-//         await t.rollback();
-//         return res.status(404).json({
-//           success: false,
-//           message: 'Selected bank not found'
-//         });
-//       }
-//     }
-
-//     const customerName = sale.customer?.name || 'کسٹمر';
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 2: Create Cheque Record (if payment method is cheque)
-//     // ═══════════════════════════════════════════════════════════════════════
-//     let chequeId = null;
-//     if (payment_method === 'cheque') {
-//       if (!cheque_number) {
-//         await t.rollback();
-//         return res.status(400).json({
-//           success: false,
-//           message: 'Cheque number is required for cheque payment'
-//         });
-//       }
-
-//       // const chequeDescription = notes ? notes : `${customerName} کی جانب سے ${sale.reference} کی ادائیگی`;
-//       const chequeDescription = notes || '';
-
-//       const cheque = await Cheque.create({
-//         bank_id: bank_id,
-//         cheque_number: cheque_number,
-//         cheque_type: 'received',
-//         amount: paymentAmount,
-//         payee_payer_name: customerName,
-//         description: chequeDescription,
-//         issue_date: payment_date ? new Date(payment_date) : new Date(),
-//         due_date: cheque_date ? new Date(cheque_date) : null,
-//         status: 'pending',
-//         created_by: req.user?.id,
-//       }, { transaction: t });
-
-//       chequeId = cheque.id;
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 3: Record Bank Transaction (if bank payment)
-//     // ═══════════════════════════════════════════════════════════════════════
-//     let bankTransaction = null;
-//     if (selectedBank && payment_method === 'bank') {
-//       const currentBalance = parseFloat(selectedBank.balance);
-//       const newBalance = currentBalance + paymentAmount;
-
-//       await selectedBank.update(
-//         { balance: newBalance.toFixed(2) },
-//         { transaction: t }
-//       );
-
-//       // const bankDescription = notes 
-//       //   ? `${notes} - ${customerName} کی جانب سے ادائیگی`
-//       //   : `${customerName} کی جانب سے ادائیگی موصول`;
-//       const bankDescription = notes || '';
-
-//       bankTransaction = await BankTransaction.create({
-//         bank_id: bank_id,
-//         transaction_type: 'in',
-//         amount: paymentAmount.toFixed(2),
-//         description: bankDescription,
-//         reference_number: sale.reference || sale.invoice_number,
-//         balance_after: newBalance.toFixed(2),
-//         created_by: req.user?.id,
-//         transaction_date: payment_date ? new Date(payment_date) : new Date()
-//       }, { transaction: t });
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 4: Update sale payment info
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // Only apply up to outstanding amount, cap at grand total
-//     const newPaid = Math.min(
-//       parseFloat(sale.amount_paid) + paymentAmount,
-//       parseFloat(sale.grand_total)
-//     );
-//     const newStatus = newPaid >= parseFloat(sale.grand_total) ? 'paid' : 'partial';
-
-//     // Urdu translations for payment method labels
-//     const methodLabels = {
-//       cash: 'نقد',
-//       bank: 'بینک ٹرانسفر',
-//       cheque: 'چیک',
-//       slip: 'سلیپ',
-//       credit: 'کریڈٹ'
-//     };
-    
-//     const methodLabel = methodLabels[payment_method] || payment_method;
-
-//     // Build payment description — only requested fields, no extra text
-//     let paymentNotes = '';
-
-//     // if (payment_method === 'cheque' && cheque_number) {
-//     //   const bankName = selectedBank?.name || bank_name || 'N/A';
-//     //   const dateStr = cheque_date ? new Date(cheque_date).toISOString().split('T')[0] : 'N/A';
-//     //   paymentNotes = `${notes ? notes + ' | ' : ''}${customerName}،چیک نمبر #${cheque_number}،${bankName}،تاریخ: ${dateStr}`;
-//     // } else if (payment_method === 'bank') {
-//     //   const bankName = selectedBank?.name || bank_name || 'N/A';
-//     //   paymentNotes = `${notes ? notes + ' | ' : ''}${customerName}،  ${bankName}`;
-//     // } else if (payment_method === 'cash') {
-//     //   paymentNotes = `${notes ? notes + ' | ' : ''}${customerName}`;
-//     // } else if (payment_method === 'slip') {
-//     //   const slipDateStr = slip_date ? new Date(slip_date).toISOString().split('T')[0] : 'N/A';
-//     //   paymentNotes = `${notes ? notes + ' | ' : ''}${customerName}، سلیپ تاریخ: ${slipDateStr}`;
-//     // } else {
-//     //   paymentNotes = notes || '';
-//     // }
-//     paymentNotes = notes || '';
-
-//     await sale.update({
-//       amount_paid: newPaid,
-//       payment_status: newStatus,
-//       payment_method: payment_method || sale.payment_method,
-//       notes: paymentNotes ? (sale.notes ? `${sale.notes}\n${paymentNotes}` : paymentNotes) : sale.notes,
-//     }, { transaction: t });
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 5: Update cheque with sale_id reference
-//     // ═══════════════════════════════════════════════════════════════════════
-//     if (chequeId) {
-//       await Cheque.update(
-//         {
-//           sale_id: sale.id,
-//           customer_id: sale.customer_id,
-//         },
-//         { where: { id: chequeId }, transaction: t }
-//       );
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 6: Create customer ledger entry for FULL payment amount
-//     // ═══════════════════════════════════════════════════════════════════════
-//     if (sale.customer_id) {
-//       // const ledgerDescription = paymentNotes || `ادائیگی موصول - ${sale.reference || sale.invoice_number} (${methodLabel})`;
-//       const ledgerDescription = paymentNotes || '';
-
-//       // Create single ledger entry for the FULL payment amount
-//       await createLedgerEntry({
-//         customerId: sale.customer_id,
-//         date: payment_date || new Date(),
-//         transactionType: 'payment',
-//         referenceId: sale.id,
-//         referenceNumber: sale.reference || sale.invoice_number,
-//         description: ledgerDescription,
-//         debit: paymentAmount, // Full payment amount
-//         credit: 0,
-//         transaction: t,
-//         paymentMethod: payment_method,
-//         bankName: selectedBank?.name || bank_name || null,
-//         bankId: bank_id || null,
-//         chequeNumber: cheque_number || null,
-//         chequeDate: cheque_date ? new Date(cheque_date) : null,
-//       });
-
-//       // ✅ NO adjustment entry for overpayment - just save the full payment
-
-//       const finalBalance = await getCustomerBalance(sale.customer_id, t);
-//       await Customer.update({ balance: finalBalance }, { where: { id: sale.customer_id }, transaction: t });
-//     }
-
-//     // ═══════════════════════════════════════════════════════════════════════
-//     // STEP 7: Cashbook entries
-//     // ═══════════════════════════════════════════════════════════════════════
-    
-//     // Cash payment
-//     // Cash payment
-//     if (payment_method === 'cash' && sale.customer_id) {
-//       await createCashbookEntry({
-//         entry_date: payment_date || new Date(),
-//         entry_type: 'cash_in',
-//         source_type: 'customer_payment',
-//         reference_id: sale.id,
-//         reference_number: sale.reference || sale.invoice_number,
-//         description: paymentNotes,
-//         amount: paymentAmount,
-//         created_by: req.user?.id,
-//         transaction: t,
-//       });
-//     }
-
-//     // Simple cashbook
-//     if (from_simple_cashbook) {
-//       await createSimpleCashbookEntry({
-//         entry_date: payment_date || new Date(),
-//         entry_type: 'cash_in',
-//         source_type: 'customer_payment',
-//         reference_id: sale.id,
-//         reference_number: sale.reference || sale.invoice_number,
-//         description: paymentNotes,
-//         amount: paymentAmount,
-//         bank_transaction_id: bankTransaction?.id || null,   // ✅ NEW
-//         cheque_id: chequeId || null,                        // ✅ NEW
-//         created_by: req.user?.id,
-//         transaction: t,
-//       });
-//     }
-//     await t.commit();
-
-//     const updated = await Sale.findByPk(id, {
-//       include: [{ model: Customer, as: 'customer', attributes: ['id', 'name', 'balance'] }],
-//     });
-
-//     // Success messages in Urdu
-//     let successMessage = 'ادائیگی کامیابی سے ریکارڈ ہوگئی';
-    
-//     if (overpaymentAmount > 0) {
-//       successMessage = `ادائیگی ${paymentAmount} ریکارڈ ہوگئی۔ (${amountToApply} لاگو ہوا، ${overpaymentAmount} زیادہ ادائیگی)`;
-//     } else if (payment_method === 'cheque' && cheque_number) {
-//       successMessage = `چیک #${cheque_number} ریکارڈ ہوگیا۔ حیثیت: زیر التواء (کلئرنگ کا انتظار)`;
-//     } else if (payment_method === 'bank' && selectedBank) {
-//       successMessage = `${selectedBank.name} میں بینک ٹرانسفر ریکارڈ ہوگیا۔ ${selectedBank.name} کا بیلنس Rs ${paymentAmount.toFixed(2)} بڑھ گیا`;
-//     } else if (payment_method === 'cash') {
-//       successMessage = `نقد ادائیگی Rs ${paymentAmount.toFixed(2)} کامیابی سے ریکارڈ ہوگئی`;
-//     } else if (payment_method === 'slip') {
-//       successMessage = `سلیپ کے ذریعے ادائیگی Rs ${paymentAmount.toFixed(2)} کامیابی سے ریکارڈ ہوگئی`;
-//     }
-
-//     res.json({ 
-//       success: true, 
-//       message: successMessage,
-//       data: {
-//         sale: updated,
-//         cheque_id: chequeId,
-//         bank_transaction: bankTransaction,
-//         overpayment: overpaymentAmount,
-//         applied_amount: Math.min(paymentAmount, outstandingBalance)
-//       }
-//     });
-//   } catch (error) {
-//     await t.rollback();
-//     console.error('Record payment error:', error);
-//     res.status(500).json({ 
-//       success: false, 
-//       message: 'سرور کی خرابی', 
-//       error: error.message 
-//     });
-//   }
-// };
 
 
 exports.getCreditSalesSummary = async (req, res) => {
