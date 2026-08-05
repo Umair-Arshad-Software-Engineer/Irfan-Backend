@@ -1,4 +1,3 @@
-// backend/src/controllers/customerLedgerController.js
 const { Op } = require('sequelize');
 const sequelize = require('../config/db');
 const { CustomerLedger, Customer } = require('../models');
@@ -166,22 +165,11 @@ exports.getCustomerLedger = async (req, res) => {
 
     // Calculate running balances for paginated entries
     let runningBalance = openingBalance;
-    // const entriesWithBalance = entries.map((entry) => {
-    //   runningBalance += parseFloat(entry.credit) - parseFloat(entry.debit);
-    //   return {
-    //     ...entry.toJSON(),
-    //     balance: parseFloat(runningBalance.toFixed(2)),
-    //   };
-    // });
-    // In getCustomerLedger function, update the entries mapping:
-
     const entriesWithBalance = entries.map((entry) => {
       runningBalance += parseFloat(entry.credit) - parseFloat(entry.debit);
       const entryJson = entry.toJSON();
       return {
         ...entryJson,
-        // ✅ Keep reference_number as is (could be user reference or invoice number)
-        // Add a separate field for invoice number if needed
         invoice_number: entryJson.transaction_type === 'sale' || entryJson.transaction_type === 'payment' 
           ? entryJson.reference_number 
           : null,
@@ -330,23 +318,12 @@ exports.addAdjustment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
-    // ✅ FIX: Normalize the incoming date.
-    // - If `date` is a plain "YYYY-MM-DD" string (no time component), JS's
-    //   Date constructor parses it as UTC midnight, which can shift it to
-    //   the previous calendar day in local time — pushing the entry out of
-    //   its intended chronological slot.
-    // - If `date` already includes a time (e.g. sent by the Flutter client
-    //   combining the picked date with the current time-of-day), we use it
-    //   as-is so same-day adjustments sort correctly among sales/payments.
-    // - If no date is sent at all, fall back to "now".
     let transactionDate;
     if (date) {
       const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(date).trim());
       if (isDateOnly) {
         const [year, month, day] = date.split('-').map(Number);
         const now = new Date();
-        // Use the given calendar date but the CURRENT time-of-day so it
-        // sorts after existing same-day entries rather than at midnight.
         transactionDate = new Date(
           year,
           month - 1,
@@ -363,13 +340,11 @@ exports.addAdjustment = async (req, res) => {
       transactionDate = new Date();
     }
 
-    // Determine transaction type
     let transactionType = 'adjustment';
     if (payment_method) {
       transactionType = 'payment';
     }
 
-    // Create adjustment entry with payment details if provided
     const entry = await createLedgerEntry({
       customer_id: customerId,
       transaction_type: transactionType,
@@ -377,7 +352,7 @@ exports.addAdjustment = async (req, res) => {
       debit: parseFloat(debit),
       credit: parseFloat(credit),
       description,
-      transaction_date: transactionDate, // ✅ normalized date
+      transaction_date: transactionDate,
       created_by: req.user?.id,
       payment_method,
       bank_name,
@@ -388,7 +363,6 @@ exports.addAdjustment = async (req, res) => {
       transaction: t,
     });
 
-    // Update customer balance
     const finalBalance = await CustomerLedger.findOne({
       where: { customer_id: customerId },
       order: [['date', 'DESC'], ['id', 'DESC']],
@@ -415,11 +389,148 @@ exports.addAdjustment = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
+//  DELETE ADJUSTMENT
+// ─────────────────────────────────────────────
+exports.deleteAdjustment = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { customerId, adjustmentId } = req.params;
+
+    const entry = await CustomerLedger.findOne({
+      where: {
+        id: adjustmentId,
+        customer_id: customerId,
+        transaction_type: 'adjustment'
+      },
+      transaction: t
+    });
+
+    if (!entry) {
+      await t.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Adjustment not found' 
+      });
+    }
+
+    await entry.destroy({ transaction: t });
+
+    const remainingEntries = await CustomerLedger.findAll({
+      where: { customer_id: customerId },
+      order: [['date', 'ASC'], ['id', 'ASC']],
+      transaction: t,
+    });
+
+    let runningBalance = 0;
+    for (const remainingEntry of remainingEntries) {
+      runningBalance += parseFloat(remainingEntry.credit) - parseFloat(remainingEntry.debit);
+      await remainingEntry.update({ balance: runningBalance.toFixed(2) }, { transaction: t });
+    }
+
+    await Customer.update(
+      { balance: runningBalance.toFixed(2) },
+      { where: { id: customerId }, transaction: t }
+    );
+
+    await t.commit();
+
+    return res.json({
+      success: true,
+      message: 'Adjustment deleted successfully',
+      data: {
+        new_balance: runningBalance.toFixed(2)
+      }
+    });
+
+  } catch (error) {
+    await t.rollback();
+    console.error('Delete adjustment error:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Server error', 
+      error: error.message 
+    });
+  }
+};
+
+// ─────────────────────────────────────────────
+//  GET CUSTOMER PAYMENTS
+// ─────────────────────────────────────────────
+exports.getCustomerPayments = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { payment_method, from, to, page = 1, limit = 50, show_uncleared_cheques = 'false' } = req.query;
+
+    const where = {
+      customer_id: customerId,
+      transaction_type: 'payment',
+    };
+
+    if (payment_method && payment_method !== 'all') {
+      where.payment_method = payment_method;
+    }
+
+    if (show_uncleared_cheques !== 'true') {
+      where[Op.or] = [
+        { payment_method: { [Op.ne]: 'cheque' } },
+        { payment_method: 'cheque', cheque_cleared: true },
+        { payment_method: null },
+      ];
+    }
+
+    if (from || to) {
+      where.date = {};
+      if (from) where.date[Op.gte] = from;
+      if (to) {
+        const toDate = new Date(to);
+        toDate.setHours(23, 59, 59, 999);
+        where.date[Op.lte] = toDate;
+      }
+    }
+
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    const { count, rows: payments } = await CustomerLedger.findAndCountAll({
+      where,
+      order: [['date', 'DESC'], ['id', 'DESC']],
+      limit: parseInt(limit),
+      offset
+    });
+
+    const totalPaid = await CustomerLedger.sum('debit', { where }) || 0;
+
+    return res.json({
+      success: true,
+      data: {
+        payments,
+        totalPaid: parseFloat(totalPaid).toFixed(2),
+        pagination: {
+          total: count,
+          page: parseInt(page),
+          pages: Math.ceil(count / parseInt(limit)),
+        },
+      },
+    });
+
+  } catch (error) {
+    console.error('Get payments error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
+// ─────────────────────────────────────────────
 //  EXPORT HELPERS FOR OTHER CONTROLLERS
 // ─────────────────────────────────────────────
-module.exports.createLedgerEntry = createLedgerEntry;
-module.exports.recalculateBalances = recalculateBalances;
-module.exports.getCustomerLedger = exports.getCustomerLedger;
-module.exports.getAllCustomersLedgerSummary = exports.getAllCustomersLedgerSummary;
-module.exports.addAdjustment = exports.addAdjustment;
-module.exports.getCustomerPayments = exports.getCustomerPayments;
+module.exports = {
+  createLedgerEntry,
+  recalculateBalances,
+  getCustomerLedger: exports.getCustomerLedger,
+  getAllCustomersLedgerSummary: exports.getAllCustomersLedgerSummary,
+  addAdjustment: exports.addAdjustment,
+  deleteAdjustment: exports.deleteAdjustment,
+  getCustomerPayments: exports.getCustomerPayments,
+};
