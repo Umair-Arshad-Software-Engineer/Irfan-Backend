@@ -39,9 +39,43 @@ exports.getAllCustomers = async (req, res) => {
       distinct: true,
     });
 
+    // Recalculate balances from ledger for each customer
+    const customersWithUpdatedBalances = await Promise.all(
+      customers.map(async (customer) => {
+        // Get all ledger entries for this customer (excluding uncleared cheques if needed)
+        const entries = await CustomerLedger.findAll({
+          where: {
+            customer_id: customer.id,
+            [Op.or]: [
+              { payment_method: { [Op.ne]: 'cheque' } },
+              { payment_method: 'cheque', cheque_cleared: true },
+              { payment_method: null },
+            ]
+          },
+          attributes: ['debit', 'credit'],
+        });
+        
+        // Calculate balance: credit - debit (credit = sales, debit = payments)
+        const totalCredit = entries.reduce((sum, e) => sum + parseFloat(e.credit), 0);
+        const totalDebit = entries.reduce((sum, e) => sum + parseFloat(e.debit), 0);
+        const calculatedBalance = totalCredit - totalDebit;
+        
+        // Update the customer's balance in the database if it's different
+        if (Math.abs(calculatedBalance - parseFloat(customer.balance)) > 0.01) {
+          await customer.update({ balance: calculatedBalance });
+        }
+        
+        // Return customer with updated balance
+        return {
+          ...customer.toJSON(),
+          balance: parseFloat(calculatedBalance.toFixed(2))
+        };
+      })
+    );
+
     res.json({
       success: true,
-      data: customers,
+      data: customersWithUpdatedBalances,
       pagination: {
         total: count,
         page: pageNum,
@@ -54,7 +88,6 @@ exports.getAllCustomers = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };
-
 // ─────────────────────────────────────────────
 //  GET ACTIVE CUSTOMERS  (for dropdowns)
 // ─────────────────────────────────────────────
@@ -342,6 +375,51 @@ exports.updateCustomerBalance = async (req, res) => {
     });
   } catch (error) {
     console.error('Update customer balance error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+exports.recalculateAllBalances = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const customers = await Customer.findAll({ transaction: t });
+    
+    let updatedCount = 0;
+    
+    for (const customer of customers) {
+      const entries = await CustomerLedger.findAll({
+        where: {
+          customer_id: customer.id,
+          [Op.or]: [
+            { payment_method: { [Op.ne]: 'cheque' } },
+            { payment_method: 'cheque', cheque_cleared: true },
+            { payment_method: null },
+          ]
+        },
+        attributes: ['debit', 'credit'],
+        transaction: t,
+      });
+      
+      const totalCredit = entries.reduce((sum, e) => sum + parseFloat(e.credit), 0);
+      const totalDebit = entries.reduce((sum, e) => sum + parseFloat(e.debit), 0);
+      const calculatedBalance = parseFloat((totalCredit - totalDebit).toFixed(2));
+      
+      if (Math.abs(calculatedBalance - parseFloat(customer.balance)) > 0.01) {
+        await customer.update({ balance: calculatedBalance }, { transaction: t });
+        updatedCount++;
+      }
+    }
+    
+    await t.commit();
+    
+    res.json({
+      success: true,
+      message: `Recalculated balances for ${updatedCount} customers`,
+      data: { updated_count: updatedCount },
+    });
+  } catch (error) {
+    await t.rollback();
+    console.error('Recalculate balances error:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };

@@ -15,7 +15,7 @@ router.put('/:id', customerController.updateCustomer);
 router.delete('/:id', customerController.deleteCustomer);
 router.patch('/:id/toggle-status', customerController.toggleCustomerStatus);
 router.patch('/:id/update-balance', customerController.updateCustomerBalance);
-
+router.post('/recalculate-balances', customerController.recalculateAllBalances);
 // Customer Ledger routes
 router.get('/:customerId/ledger', customerLedgerController.getCustomerLedger);
 router.post('/:customerId/adjustment', customerLedgerController.addAdjustment);
@@ -26,5 +26,6 @@ router.get('/:customerId/payments', customerPaymentController.getCustomerPayment
 router.delete('/:customerId/payments/:paymentId', customerPaymentController.deleteCustomerPayment);
 router.get('/payments/:paymentId', customerPaymentController.getPaymentDetails);
 router.patch('/payments/cheque/:ledgerEntryId/clear', customerPaymentController.updateChequeClearedStatus);
+
 
 module.exports = router;
