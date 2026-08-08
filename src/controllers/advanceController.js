@@ -230,7 +230,7 @@ exports.deleteAdvance = async (req, res) => {
       const employee_id = advance.employee_id;
       await advance.destroy({ transaction });
 
-      // Fully recalculates every remaining entry's balance from scratch, in date/createdAt order
+      // Fully recalculates every remaining entry's balance from scratch, in date/createdAt orders
       const currentBalance = await updateEmployeeBalances(employee_id, transaction);
 
       await transaction.commit();
