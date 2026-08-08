@@ -1,7 +1,17 @@
 // backend/src/controllers/simpleCashbookController.js
 const { Op } = require('sequelize');
 const sequelize = require('../config/db');
-const { SimpleCashbook } = require('../models');
+// const { SimpleCashbook } = require('../models');
+const {
+  SimpleCashbook,
+  CustomerLedger,
+  Sale,
+  Bank,
+  BankTransaction,
+  Cheque,
+  Cashbook,      // legacy cashbook model (if named differently, adjust)
+  Customer,      // to update customer balance
+} = require('../models');
 
 // Recalculate ALL balances in correct date+id order
 async function recalculateBalances(transaction) {
@@ -519,6 +529,36 @@ exports.updateManualEntry = async (req, res) => {
 };
 
 // DELETE /simple-cashbook/:id
+// exports.deleteEntry = async (req, res) => {
+//   const t = await sequelize.transaction();
+//   try {
+//     const { id } = req.params;
+//     const entry = await SimpleCashbook.findByPk(id, { transaction: t });
+
+//     if (!entry) {
+//       await t.rollback();
+//       return res.status(404).json({ success: false, message: 'Entry not found' });
+//     }
+//     if (entry.source_type !== 'manual') {
+//       await t.rollback();
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Only manual entries can be deleted.',
+//       });
+//     }
+
+//     await entry.destroy({ transaction: t });
+//     await recalculateBalances(t);
+//     await t.commit();
+
+//     res.json({ success: true, message: 'Entry deleted and balances updated' });
+//   } catch (error) {
+//     await t.rollback();
+//     console.error('Delete entry error:', error);
+//     res.status(500).json({ success: false, message: 'Server error', error: error.message });
+//   }
+// };
+
 exports.deleteEntry = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -529,19 +569,101 @@ exports.deleteEntry = async (req, res) => {
       await t.rollback();
       return res.status(404).json({ success: false, message: 'Entry not found' });
     }
-    if (entry.source_type !== 'manual') {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Only manual entries can be deleted.',
+
+    // --- Handle different source types ---
+    if (entry.source_type === 'customer_payment' && entry.reference_id) {
+      // 1. Delete the corresponding customer ledger entry
+      const ledgerEntries = await CustomerLedger.findAll({
+        where: {
+          reference_id: entry.reference_id,
+          transaction_type: 'payment',
+          debit: parseFloat(entry.amount),  // match amount
+        },
+        transaction: t,
       });
+      // If multiple matches, delete all (edge case)
+      for (const led of ledgerEntries) {
+        await led.destroy({ transaction: t });
+      }
+
+      // 2. Update the sale's amount_paid
+      const sale = await Sale.findByPk(entry.reference_id, { transaction: t });
+      if (sale) {
+        const newPaid = Math.max(0, parseFloat(sale.amount_paid) - parseFloat(entry.amount));
+        await sale.update({
+          amount_paid: newPaid,
+          payment_status: newPaid >= parseFloat(sale.grand_total) ? 'paid' : (newPaid > 0 ? 'partial' : 'unpaid'),
+        }, { transaction: t });
+      }
+
+      // 3. Recalculate customer balance
+      if (entry.reference_id) {
+        // We need the customer_id – fetch from sale or from ledger entry
+        let customerId = null;
+        if (sale) customerId = sale.customer_id;
+        else {
+          // fallback: get from ledger entry
+          const led = await CustomerLedger.findOne({
+            where: { reference_id: entry.reference_id, transaction_type: 'payment' },
+            attributes: ['customer_id'],
+            transaction: t,
+          });
+          if (led) customerId = led.customer_id;
+        }
+        if (customerId) {
+          const remainingEntries = await CustomerLedger.findAll({
+            where: { customer_id: customerId },
+            order: [['date', 'ASC'], ['id', 'ASC']],
+            transaction: t,
+          });
+          let running = 0;
+          for (const e of remainingEntries) {
+            running = running + parseFloat(e.credit) - parseFloat(e.debit);
+            await e.update({ balance: running.toFixed(2) }, { transaction: t });
+          }
+          await Customer.update(
+            { balance: running.toFixed(2) },
+            { where: { id: customerId }, transaction: t }
+          );
+        }
+      }
     }
 
+    // --- Delete linked bank transaction (if any) ---
+    if (entry.bank_transaction_id) {
+      const bankTx = await BankTransaction.findByPk(entry.bank_transaction_id, { transaction: t });
+      if (bankTx) {
+        // Reverse bank balance
+        const bank = await Bank.findByPk(bankTx.bank_id, { transaction: t });
+        if (bank) {
+          const reverseAmount = parseFloat(bankTx.amount);
+          const newBalance = parseFloat(bank.balance) - reverseAmount; // because it was an 'in' transaction
+          await bank.update({ balance: newBalance.toFixed(2) }, { transaction: t });
+        }
+        await bankTx.destroy({ transaction: t });
+      }
+    }
+
+    // --- Delete linked cheque (if any) ---
+    if (entry.cheque_id) {
+      await Cheque.destroy({ where: { id: entry.cheque_id }, transaction: t });
+    }
+
+    // --- Delete linked legacy cashbook entry (if any) ---
+    if (entry.legacy_cashbook_id) {
+      const { Cashbook } = require('../models');
+      await Cashbook.destroy({ where: { id: entry.legacy_cashbook_id }, transaction: t });
+    }
+
+    // --- Finally, delete the cashbook entry itself ---
     await entry.destroy({ transaction: t });
+
+    // --- Recalculate all cashbook balances ---
     await recalculateBalances(t);
+
     await t.commit();
 
-    res.json({ success: true, message: 'Entry deleted and balances updated' });
+    res.json({ success: true, message: 'Entry and all related records deleted successfully' });
   } catch (error) {
     await t.rollback();
     console.error('Delete entry error:', error);

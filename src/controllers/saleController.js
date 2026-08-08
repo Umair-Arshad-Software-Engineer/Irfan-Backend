@@ -1315,8 +1315,6 @@ exports.getDailySummary = async (req, res) => {
   }
 };
 
-
-
 exports.recordPayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
