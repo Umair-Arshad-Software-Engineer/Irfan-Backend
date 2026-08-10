@@ -13,6 +13,7 @@ router.delete('/:id',     purchaseOrderController.deletePurchaseOrder);   // dra
 
 // ── Purchase Receipt routes ────────────────────────────────────────────────
 router.post('/receipts',                     purchaseReceiptController.createPurchaseReceipt);
+router.get('/receipts/all',                  purchaseReceiptController.getAllPurchaseReceipts);
 router.get('/receipts/:id',                  purchaseReceiptController.getPurchaseReceiptById);  // ← ADD
 router.delete('/receipts/:id',               purchaseReceiptController.deletePurchaseReceipt);
 router.get('/:purchaseOrderId/receipts',     purchaseReceiptController.getReceiptsByPurchaseOrder);

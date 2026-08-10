@@ -7,6 +7,7 @@ const {
   PurchaseOrder,
   PurchaseOrderItem,
   Product,
+  Supplier,  // ← ADD THIS IMPORT
   SupplierLedger,  // ← Add this import
   sequelize,
 } = require('../models');
@@ -444,6 +445,78 @@ exports.getPurchaseReceiptById = async (req, res) => {
     res.json({ success: true, data: receipt });
   } catch (error) {
     console.error('Get receipt by ID error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// ── Get all purchase receipts (with date range / search filters) ─────────────
+// Add this exported function to backend/src/controllers/purchaseReceiptController.js
+exports.getAllPurchaseReceipts = async (req, res) => {
+  try {
+    const { from_date, to_date, supplier_id, search, page = 1, limit = 100 } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = (pageNum - 1) * limitNum;
+
+    const whereClause = {};
+
+    if (from_date || to_date) {
+      whereClause.receipt_date = {};
+      if (from_date) whereClause.receipt_date[Op.gte] = new Date(from_date);
+      if (to_date) whereClause.receipt_date[Op.lte] = new Date(to_date + 'T23:59:59.999Z');
+    }
+
+    if (search) {
+      whereClause.receipt_number = { [Op.like]: `%${search}%` };
+    }
+
+    const include = [
+      {
+        model: PurchaseOrder,
+        as: 'purchaseOrder',
+        attributes: ['id', 'po_number', 'supplier_id'],
+        include: [
+          {
+            model: Supplier,
+            as: 'supplier',
+            attributes: ['id', 'name', 'contact'],
+            required: !!supplier_id,
+            ...(supplier_id ? { where: { id: supplier_id } } : {}),
+          },
+        ],
+        required: true,
+      },
+      {
+        model: PurchaseReceiptItem,
+        as: 'items',
+        include: [
+          { model: Product, as: 'product', attributes: ['id', 'item_name', 'barcode'] },
+        ],
+      },
+    ];
+
+    const { count, rows: receipts } = await PurchaseReceipt.findAndCountAll({
+      where: whereClause,
+      include,
+      order: [['receipt_date', 'DESC'], ['id', 'DESC']],
+      limit: limitNum,
+      offset,
+      distinct: true,
+    });
+
+    res.json({
+      success: true,
+      data: receipts,
+      pagination: {
+        total: count,
+        page: pageNum,
+        limit: limitNum,
+        pages: Math.ceil(count / limitNum),
+      },
+    });
+  } catch (error) {
+    console.error('Get all purchase receipts error:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };
