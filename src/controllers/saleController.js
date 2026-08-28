@@ -202,15 +202,21 @@ exports.getAllSales = async (req, res) => {
         return saleJson;
       }
 
-      // ── Previous balance calculation (your existing code) ──
-            // ── Previous balance = current ledger balance − this invoice's total ──
-      // Whatever the customer owes right now, minus what this specific
-      // invoice contributed, is what they owed before this invoice.
+      // ── Previous balance calculation ──
+      // Sale ke time do ledger entries bunti hain:
+      //   1) sale credit entry = (grand_total - paid)
+      //   2) payment debit entry = paid
+      // Net change = (grand_total - paid) - paid = grand_total - (2 × paid)
+      // Isliye previous_balance nikalne ke liye paid ko wapis add karna zaroori hai,
+      // warna paid amount do baar deduct ho jata tha.
       const customerBalanceNow = parseFloat(sale.customer?.balance ?? 0);
-      const previousBalance = customerBalanceNow - parseFloat(sale.grand_total);
+      const paidAmount = parseFloat(sale.amount_paid) || 0;
+      const previousBalance = customerBalanceNow - parseFloat(sale.grand_total) + (paidAmount * 2);
 
       saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
       saleJson.customer_balance = customerBalanceNow;
+
+
       // const saleEntry = await CustomerLedger.findOne({
       //   where: {
       //     customer_id: sale.customer_id,
