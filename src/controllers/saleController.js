@@ -203,41 +203,41 @@ exports.getAllSales = async (req, res) => {
       }
 
       // ── Previous balance calculation (your existing code) ──
-      const saleEntry = await CustomerLedger.findOne({
-        where: {
-          customer_id: sale.customer_id,
-          reference_id: sale.id,
-          transaction_type: 'sale',
-        },
-        order: [['id', 'ASC']],
-      });
-
-      let previousBalance = 0;
-      if (saleEntry) {
-        previousBalance =
-          parseFloat(saleEntry.balance) -
-          parseFloat(saleEntry.credit) +
-          parseFloat(saleEntry.debit);
-      } else {
-        const remaining = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
-        previousBalance = Math.max(
-          parseFloat(sale.customer?.balance ?? 0) - remaining,
-          0
-        );
-      }
+            // ── Previous balance = current ledger balance − this invoice's total ──
+      // Whatever the customer owes right now, minus what this specific
+      // invoice contributed, is what they owed before this invoice.
+      const customerBalanceNow = parseFloat(sale.customer?.balance ?? 0);
+      const previousBalance = customerBalanceNow - parseFloat(sale.grand_total);
 
       saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
-      saleJson.customer_balance = parseFloat(sale.customer?.balance ?? 0);
-
-      // ── NEW: Build payment_details from CustomerLedger payment entries ──
-      // const paymentEntries = await CustomerLedger.findAll({
+      saleJson.customer_balance = customerBalanceNow;
+      // const saleEntry = await CustomerLedger.findOne({
       //   where: {
       //     customer_id: sale.customer_id,
       //     reference_id: sale.id,
-      //     transaction_type: 'payment',
+      //     transaction_type: 'sale',
       //   },
       //   order: [['id', 'ASC']],
       // });
+
+      // let previousBalance = 0;
+      // if (saleEntry) {
+      //   previousBalance =
+      //     parseFloat(saleEntry.balance) -
+      //     parseFloat(saleEntry.credit) +
+      //     parseFloat(saleEntry.debit);
+      // } else {
+      //   const remaining = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
+      //   previousBalance = Math.max(
+      //     parseFloat(sale.customer?.balance ?? 0) - remaining,
+      //     0
+      //   );
+      // }
+
+      // saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
+      // saleJson.customer_balance = parseFloat(sale.customer?.balance ?? 0);
+
+    
       const paymentEntries = await CustomerLedger.findAll({
         where: {
           customer_id: sale.customer_id,
