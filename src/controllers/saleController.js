@@ -112,6 +112,242 @@ function normalizePaymentMethod(method) {
   return map[method] || 'cash';
 }
 
+// exports.getAllSales = async (req, res) => {
+//   try {
+//     const {
+//       page = 1, limit = 20, search, sale_type, sale_category, payment_status,
+//       payment_method, customer_id, date_from, date_to,
+//       sort_by = 'created_at', sort_order = 'DESC',
+//     } = req.query;
+
+//     const pageNum = parseInt(page);
+//     const limitNum = parseInt(limit);
+//     const offset = (pageNum - 1) * limitNum;
+//     const whereClause = {};
+
+//     let includeCustomer = false;
+//     if (search) includeCustomer = true;
+//     if (sale_type) whereClause.sale_type = sale_type;
+//     if (sale_category) whereClause.sale_category = sale_category;
+//     if (payment_status) whereClause.payment_status = payment_status;
+//     if (payment_method) whereClause.payment_method = payment_method;
+//     if (customer_id) { whereClause.customer_id = customer_id; includeCustomer = true; }
+//     if (date_from || date_to) {
+//       whereClause.sale_date = {};
+//       if (date_from) whereClause.sale_date[Op.gte] = date_from;
+//       if (date_to) whereClause.sale_date[Op.lte] = date_to;
+//     }
+
+//     const include = [
+//       {
+//         model: Customer, as: 'customer',
+//         attributes: ['id', 'name', 'contact', 'customer_type', 'balance'],
+//         required: includeCustomer ? true : false,
+//         ...(search ? { where: { name: { [Op.like]: `%${search}%` } } } : {})
+//       },
+//       // In getAllSales, change the SaleItem include attributes:
+//       {
+//         model: SaleItem, as: 'items',
+//         attributes: [
+//           'id', 'product_id',              // ← ADD product_id HERE
+//           'product_name', 'quantity', 'unit_price', 'total_price',
+//           'selected_lengths', 'length_quantities', 'selected_lengths_display',
+//           'total_pieces', 'weight', 'used_customer_price', 'description'
+//         ],
+//         include: [
+//           { model: Product, as: 'product', attributes: ['id', 'item_name', 'barcode'], required: false },
+//         ],
+//       },
+//     ];
+
+//     const mainWhereClause = { ...whereClause };
+//     if (search && !includeCustomer) {
+//       mainWhereClause.invoice_number = { [Op.like]: `%${search}%` };
+//     }
+
+//     const { count, rows: sales } = await Sale.findAndCountAll({
+//       where: mainWhereClause, include,
+//       order: [[sort_by, sort_order]],
+//       limit: limitNum, offset, distinct: true, subQuery: false,
+//     });
+
+//     // ─────────────────────────────────────────────
+//     //  Compute previous_balance for each sale
+//     // ─────────────────────────────────────────────
+//     const salesWithBalance = await Promise.all(sales.map(async (sale) => {
+//       const saleJson = sale.toJSON();
+
+//       // if (!sale.customer_id) {
+//       //   saleJson.previous_balance = 0;
+//       //   saleJson.customer_balance = 0;
+//       //   saleJson.payment_details = null;
+//       //   return saleJson;
+//       // }
+//       if (!sale.customer_id) {
+//         saleJson.previous_balance = 0;
+//         saleJson.customer_balance = 0;
+//         const method = (sale.payment_method || 'cash').toLowerCase();
+//         const paid = parseFloat(sale.amount_paid) || 0;
+//         saleJson.payment_details = paid > 0
+//           ? [{
+//               method,
+//               amount: paid,
+//               date: sale.sale_date,
+//               description: `Payment for ${sale.invoice_number}`,
+//               reference_number: sale.reference || sale.invoice_number,
+//               bank_name: null,
+//               cheque_number: null,
+//             }]
+//           : [];
+//         return saleJson;
+//       }
+
+//       // ── Previous balance calculation (your existing code) ──
+//             // ── Previous balance = current ledger balance − this invoice's total ──
+//       // Whatever the customer owes right now, minus what this specific
+//       // invoice contributed, is what they owed before this invoice.
+//       const customerBalanceNow = parseFloat(sale.customer?.balance ?? 0);
+//       const previousBalance = customerBalanceNow - parseFloat(sale.grand_total);
+
+//       saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
+//       saleJson.customer_balance = customerBalanceNow;
+      
+//       // const saleEntry = await CustomerLedger.findOne({
+//       //   where: {
+//       //     customer_id: sale.customer_id,
+//       //     reference_id: sale.id,
+//       //     transaction_type: 'sale',
+//       //   },
+//       //   order: [['id', 'ASC']],
+//       // });
+
+//       // let previousBalance = 0;
+//       // if (saleEntry) {
+//       //   previousBalance =
+//       //     parseFloat(saleEntry.balance) -
+//       //     parseFloat(saleEntry.credit) +
+//       //     parseFloat(saleEntry.debit);
+//       // } else {
+//       //   const remaining = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
+//       //   previousBalance = Math.max(
+//       //     parseFloat(sale.customer?.balance ?? 0) - remaining,
+//       //     0
+//       //   );
+//       // }
+
+//       // saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
+//       // saleJson.customer_balance = parseFloat(sale.customer?.balance ?? 0);
+
+    
+//       const paymentEntries = await CustomerLedger.findAll({
+//         where: {
+//           customer_id: sale.customer_id,
+//           reference_id: sale.id,
+//           transaction_type: 'payment',
+//           [Op.or]: [
+//             { payment_method: { [Op.ne]: 'cheque' } },
+//             { payment_method: 'cheque', cheque_cleared: true },
+//           ],
+//         },
+//         order: [['id', 'ASC']],
+//       });
+//       // if (paymentEntries.length > 0) {
+//       //   const paymentDetails = {};
+//       //   for (const entry of paymentEntries) {
+//       //     const method = (entry.payment_method || 'cash').toLowerCase();
+//       //     const amount = parseFloat(entry.debit) || 0;
+//       //     if (amount > 0) {
+//       //       paymentDetails[method] = (paymentDetails[method] || 0) + amount;
+//       //     }
+//       //   }
+//       //   saleJson.payment_details = paymentDetails;
+//       // } else {
+//       //   // Fallback: single method
+//       //   const method = (sale.payment_method || 'cash').toLowerCase();
+//       //   const paid = parseFloat(sale.amount_paid) || 0;
+//       //   saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
+//       // }
+//       if (paymentEntries.length > 0) {
+//         const paymentDetails = [];
+//         for (const entry of paymentEntries) {
+//           const amount = parseFloat(entry.debit) || 0;
+//           if (amount > 0) {
+//             paymentDetails.push({
+//               method: (entry.payment_method || 'cash').toLowerCase(),
+//               amount: amount,
+//               date: entry.date,
+//               description: entry.description || null,
+//               reference_number: entry.reference_number || null,
+//               bank_name: entry.bank_name || null,
+//               cheque_number: entry.cheque_number || null,
+//             });
+//           }
+//         }
+//         saleJson.payment_details = paymentDetails;
+//       } else {
+//         // Fallback: single method, no ledger entries yet
+//         const method = (sale.payment_method || 'cash').toLowerCase();
+//         const paid = parseFloat(sale.amount_paid) || 0;
+//         saleJson.payment_details = paid > 0
+//           ? [{
+//               method,
+//               amount: paid,
+//               date: sale.sale_date,
+//               description: `Initial payment for ${sale.invoice_number}`,
+//               reference_number: sale.reference || sale.invoice_number,
+//               bank_name: null,
+//               cheque_number: null,
+//             }]
+//           : [];
+//       }
+
+//       return saleJson;
+//     }));
+
+//     // ─────────────────────────────────────────────
+//     //  Summary
+//     // ─────────────────────────────────────────────
+//     let summaryQuery = {
+//       where: { ...whereClause },
+//       attributes: [
+//         [fn('SUM', col('Sale.grand_total')), 'total_revenue'],
+//         [fn('SUM', col('Sale.discount_amount')), 'total_discount'],
+//         [fn('COUNT', col('Sale.id')), 'total_transactions'],
+//       ],
+//       raw: true,
+//     };
+
+//     if (search) {
+//       summaryQuery.include = [
+//         { model: Customer, as: 'customer', required: true, where: { name: { [Op.like]: `%${search}%` } }, attributes: [] }
+//       ];
+//       summaryQuery.where = {
+//         ...whereClause,
+//         [Op.or]: [
+//           { invoice_number: { [Op.like]: `%${search}%` } },
+//           { '$customer.name$': { [Op.like]: `%${search}%` } }
+//         ]
+//       };
+//     }
+
+//     const totals = await Sale.findOne(summaryQuery);
+
+//     res.json({
+//       success: true,
+//       data: salesWithBalance,
+//       pagination: { total: count, page: pageNum, limit: limitNum, pages: Math.ceil(count / limitNum) },
+//       summary: {
+//         total_revenue: parseFloat(totals?.total_revenue) || 0,
+//         total_discount: parseFloat(totals?.total_discount) || 0,
+//         total_transactions: parseInt(totals?.total_transactions) || 0,
+//       },
+//     });
+//   } catch (error) {
+//     console.error('Get all sales error:', error);
+//     res.status(500).json({ success: false, message: 'Server error', error: error.message });
+//   }
+// };
+
 exports.getAllSales = async (req, res) => {
   try {
     const {
@@ -145,11 +381,10 @@ exports.getAllSales = async (req, res) => {
         required: includeCustomer ? true : false,
         ...(search ? { where: { name: { [Op.like]: `%${search}%` } } } : {})
       },
-      // In getAllSales, change the SaleItem include attributes:
       {
         model: SaleItem, as: 'items',
         attributes: [
-          'id', 'product_id',              // ← ADD product_id HERE
+          'id', 'product_id',
           'product_name', 'quantity', 'unit_price', 'total_price',
           'selected_lengths', 'length_quantities', 'selected_lengths_display',
           'total_pieces', 'weight', 'used_customer_price', 'description'
@@ -177,12 +412,6 @@ exports.getAllSales = async (req, res) => {
     const salesWithBalance = await Promise.all(sales.map(async (sale) => {
       const saleJson = sale.toJSON();
 
-      // if (!sale.customer_id) {
-      //   saleJson.previous_balance = 0;
-      //   saleJson.customer_balance = 0;
-      //   saleJson.payment_details = null;
-      //   return saleJson;
-      // }
       if (!sale.customer_id) {
         saleJson.previous_balance = 0;
         saleJson.customer_balance = 0;
@@ -202,71 +431,36 @@ exports.getAllSales = async (req, res) => {
         return saleJson;
       }
 
-      // ── Previous balance calculation (your existing code) ──
-            // ── Previous balance = current ledger balance − this invoice's total ──
-      // Whatever the customer owes right now, minus what this specific
-      // invoice contributed, is what they owed before this invoice.
       const customerBalanceNow = parseFloat(sale.customer?.balance ?? 0);
-      const previousBalance = customerBalanceNow - parseFloat(sale.grand_total);
 
-      saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
-      saleJson.customer_balance = customerBalanceNow;
-      
-      // const saleEntry = await CustomerLedger.findOne({
-      //   where: {
-      //     customer_id: sale.customer_id,
-      //     reference_id: sale.id,
-      //     transaction_type: 'sale',
-      //   },
-      //   order: [['id', 'ASC']],
-      // });
-
-      // let previousBalance = 0;
-      // if (saleEntry) {
-      //   previousBalance =
-      //     parseFloat(saleEntry.balance) -
-      //     parseFloat(saleEntry.credit) +
-      //     parseFloat(saleEntry.debit);
-      // } else {
-      //   const remaining = parseFloat(sale.grand_total) - parseFloat(sale.amount_paid);
-      //   previousBalance = Math.max(
-      //     parseFloat(sale.customer?.balance ?? 0) - remaining,
-      //     0
-      //   );
-      // }
-
-      // saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
-      // saleJson.customer_balance = parseFloat(sale.customer?.balance ?? 0);
-
-    
-      const paymentEntries = await CustomerLedger.findAll({
+      // ── Fetch ALL ledger entries tied to this specific sale (sale + payments) ──
+      // This works correctly for every case: credit sales, cash sales,
+      // single or multiple (e.g. multiple cheque) payments — since we
+      // reverse the EXACT net change this sale caused, instead of guessing
+      // from grand_total / amount_paid.
+      const saleLedgerEntries = await CustomerLedger.findAll({
         where: {
           customer_id: sale.customer_id,
           reference_id: sale.id,
-          transaction_type: 'payment',
-          [Op.or]: [
-            { payment_method: { [Op.ne]: 'cheque' } },
-            { payment_method: 'cheque', cheque_cleared: true },
-          ],
         },
         order: [['id', 'ASC']],
       });
-      // if (paymentEntries.length > 0) {
-      //   const paymentDetails = {};
-      //   for (const entry of paymentEntries) {
-      //     const method = (entry.payment_method || 'cash').toLowerCase();
-      //     const amount = parseFloat(entry.debit) || 0;
-      //     if (amount > 0) {
-      //       paymentDetails[method] = (paymentDetails[method] || 0) + amount;
-      //     }
-      //   }
-      //   saleJson.payment_details = paymentDetails;
-      // } else {
-      //   // Fallback: single method
-      //   const method = (sale.payment_method || 'cash').toLowerCase();
-      //   const paid = parseFloat(sale.amount_paid) || 0;
-      //   saleJson.payment_details = paid > 0 ? { [method]: paid } : null;
-      // }
+
+      const saleNetChange = saleLedgerEntries.reduce(
+        (sum, entry) => sum + parseFloat(entry.credit) - parseFloat(entry.debit),
+        0
+      );
+      const previousBalance = customerBalanceNow - saleNetChange;
+
+      saleJson.previous_balance = parseFloat(previousBalance.toFixed(2));
+      saleJson.customer_balance = customerBalanceNow;
+
+      // ── Build payment_details from the same fetched entries (no extra query) ──
+      const paymentEntries = saleLedgerEntries.filter(entry =>
+        entry.transaction_type === 'payment' &&
+        (entry.payment_method !== 'cheque' || entry.cheque_cleared === true)
+      );
+
       if (paymentEntries.length > 0) {
         const paymentDetails = [];
         for (const entry of paymentEntries) {
