@@ -117,10 +117,22 @@ exports.createPurchaseReceipt = async (req, res) => {
           });
         }
 
-        const newReceived = poItem.quantity_received + item.quantity_received;
+        // const newReceived = poItem.quantity_received + item.quantity_received;
         
-        // Calculate line total
-        const lineTotal = item.quantity_received * parseFloat(poItem.unit_cost);
+        // // Calculate line total
+        // const lineTotal = item.quantity_received * parseFloat(poItem.unit_cost);
+        // receiptTotal += lineTotal;
+                const newReceived = poItem.quantity_received + item.quantity_received;
+
+        // Calculate line total — apply the PO item's discount % and tax %,
+        // same as the PO's own totals do.
+        const cost = parseFloat(poItem.unit_cost);
+        const discountPercent = parseFloat(poItem.discount_percent || 0);
+        const taxPercent = parseFloat(poItem.tax_percent || 0);
+
+        const rawTotal = item.quantity_received * cost;
+        const afterDiscount = rawTotal * (1 - discountPercent / 100);
+        const lineTotal = afterDiscount * (1 + taxPercent / 100);
         receiptTotal += lineTotal;
 
         // Create receipt item record
@@ -218,7 +230,20 @@ exports.createPurchaseReceipt = async (req, res) => {
       },
       { transaction }
     );
+    // ── Add order-level shipping/tax/discount only when this receipt ────────
+    // ── completes the PO, so it isn't double-counted across partial receipts.
+    if (poFullyReceived) {
+      const orderExtras =
+        parseFloat(purchaseOrder.tax_amount || 0) +
+        parseFloat(purchaseOrder.shipping_cost || 0) -
+        parseFloat(purchaseOrder.discount_amount || 0);
 
+      receiptTotal += orderExtras;
+    }
+    receiptTotal = parseFloat(receiptTotal.toFixed(2));
+
+    // Persist the corrected total on the receipt itself
+    await receipt.update({ total_amount: receiptTotal }, { transaction });
     // ── CREATE SUPPLIER LEDGER ENTRY WITH RECEIPT DATE ────────────────────────
     // Goods received = we owe supplier = CREDIT entry
     await createLedgerEntry({
