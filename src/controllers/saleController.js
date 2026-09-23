@@ -700,6 +700,527 @@ exports.createSale = async (req, res) => {
   }
 };
 
+// exports.updateSale = async (req, res) => {
+//   const t = await sequelize.transaction();
+//   try {
+//     const { id } = req.params;
+//     const {
+//       sale_category,
+//       customer_id,
+//       sale_date,
+//       due_date,
+//       items,
+//       discount_type,
+//       discount_value,
+//       payment_method: rawPaymentMethod,
+//       payment_status,
+//       amount_paid,
+//       notes,
+//       reference,
+//     } = req.body;
+
+//     const sale = await Sale.findByPk(id, {
+//       include: [{ model: SaleItem, as: 'items' }],
+//       transaction: t,
+//     });
+
+//     if (!sale) {
+//       await t.rollback();
+//       return res.status(404).json({ success: false, message: 'Sale not found' });
+//     }
+
+//     if (sale.payment_status === 'paid') {
+//       await t.rollback();
+//       return res.status(400).json({ success: false, message: 'Cannot edit a fully paid sale' });
+//     }
+
+//     const payment_method = rawPaymentMethod
+//       ? normalizePaymentMethod(rawPaymentMethod)
+//       : sale.payment_method;
+
+//     const isSarya = (sale_category ?? sale.sale_category) === 'sarya';
+//     const oldCustomerId = sale.customer_id;
+//     const newCustomerId = customer_id !== undefined ? customer_id : sale.customer_id;
+
+//     // ─────────────────────────────────────────────
+//     //  STEP 1: Remove old ledger entries for this sale
+//     //  ✅ FIX: instead of inserting an "adjustment" row that reverses the old
+//     //  sale/payment entries (which left both the old rows AND a reversal row
+//     //  visible in the ledger), we now DELETE the old sale/payment rows
+//     //  outright and recalculate the running balance. This keeps the ledger
+//     //  showing a single clean sale entry + payment entry per sale, exactly
+//     //  like a freshly created sale — no extra adjustment noise.
+//     // ─────────────────────────────────────────────
+//     if (oldCustomerId) {
+//       await CustomerLedger.destroy({
+//         where: {
+//           customer_id: oldCustomerId,
+//           reference_id: sale.id,
+//           transaction_type: { [Op.in]: ['sale', 'payment'] },
+//         },
+//         transaction: t,
+//       });
+
+//       // Recalculate old customer's balance from whatever ledger rows remain
+//       const oldRemainingEntries = await CustomerLedger.findAll({
+//         where: { customer_id: oldCustomerId },
+//         order: [['date', 'ASC'], ['id', 'ASC']],
+//         transaction: t,
+//       });
+
+//       let oldRunningBalance = 0;
+//       for (const entry of oldRemainingEntries) {
+//         oldRunningBalance += parseFloat(entry.credit) - parseFloat(entry.debit);
+//         await entry.update({ balance: oldRunningBalance.toFixed(2) }, { transaction: t });
+//       }
+
+//       await Customer.update(
+//         { balance: oldRunningBalance.toFixed(2) },
+//         { where: { id: oldCustomerId }, transaction: t }
+//       );
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  STEP 2: Handle items replacement if provided
+//     // ─────────────────────────────────────────────
+//     let subtotal = parseFloat(sale.subtotal);
+//     let newDiscountType = discount_type ?? sale.discount_type;
+//     let newDiscountValue = discount_value != null
+//       ? parseFloat(discount_value)
+//       : parseFloat(sale.discount_value);
+
+//     if (items && Array.isArray(items) && items.length > 0) {
+//       // Restore old stock (FILLED only)
+//       if (sale.sale_category !== 'sarya') {
+//         for (const oldItem of sale.items) {
+//           if (oldItem.quantity > 0) {
+//             await Product.increment(
+//               { physical_qty: oldItem.quantity, available_qty: oldItem.quantity },
+//               { where: { id: oldItem.product_id }, transaction: t }
+//             );
+//           }
+//         }
+//       }
+
+//       // Delete old items
+//       await SaleItem.destroy({ where: { sale_id: id }, transaction: t });
+
+//       // Create new items
+//       subtotal = 0;
+//       const newSnapshots = [];
+
+//       for (const item of items) {
+//         if (!item.product_id) {
+//           await t.rollback();
+//           return res.status(400).json({ success: false, message: 'Each item must have a product_id' });
+//         }
+
+//         const product = await Product.findByPk(item.product_id, { transaction: t });
+//         if (!product) {
+//           await t.rollback();
+//           return res.status(404).json({
+//             success: false,
+//             message: `Product id ${item.product_id} not found`,
+//           });
+//         }
+
+//         const unitPrice = parseFloat(item.unit_price ?? product.sale_price);
+//         let quantity = 0;
+//         let weight = null;
+//         let totalPrice = 0;
+
+//         if (isSarya) {
+//           weight = item.weight != null ? parseFloat(item.weight) : null;
+//           if (!weight || weight <= 0) {
+//             await t.rollback();
+//             return res.status(400).json({
+//               success: false,
+//               message: `SARYA mode requires weight > 0 for product_id: ${item.product_id}`,
+//             });
+//           }
+//           quantity = 0;
+//           totalPrice = weight * unitPrice;
+//         } else {
+//           quantity = item.quantity ? parseInt(item.quantity) : 0;
+//           if (!quantity || quantity < 1) {
+//             await t.rollback();
+//             return res.status(400).json({
+//               success: false,
+//               message: `Each item must have quantity >= 1 for product_id: ${item.product_id}`,
+//             });
+//           }
+//           if (product.available_qty < quantity) {
+//             await t.rollback();
+//             return res.status(400).json({
+//               success: false,
+//               message: `Insufficient stock for "${product.item_name}". Available: ${product.available_qty}`,
+//             });
+//           }
+//           totalPrice = unitPrice * quantity;
+//         }
+
+//         subtotal += totalPrice;
+
+//         const {
+//           selectedLengths,
+//           lengthQuantities,
+//           selectedLengthsDisplay,
+//           totalPieces,
+//         } = parseLengthFields(item);
+
+//         const description = item.description?.trim() || null;
+
+//         newSnapshots.push({
+//           sale_id: parseInt(id),
+//           product_id: product.id,
+//           product_name: product.item_name,
+//           description: description,
+//           barcode: product.barcode,
+//           unit_price: unitPrice,
+//           quantity,
+//           total_price: totalPrice,
+//           selected_lengths: selectedLengths,
+//           length_quantities: lengthQuantities,
+//           selected_lengths_display: selectedLengthsDisplay,
+//           total_pieces: totalPieces,
+//           weight,
+//           used_customer_price: item.used_customer_price === true,
+//           _isSarya: isSarya,
+//           _qty: quantity,
+//           _productId: product.id,
+//         });
+//       }
+
+//       await SaleItem.bulkCreate(
+//         newSnapshots.map(({ _isSarya, _qty, _productId, ...snap }) => snap),
+//         { transaction: t }
+//       );
+
+//       // Deduct new stock (FILLED only)
+//       for (const snap of newSnapshots) {
+//         if (!snap._isSarya && snap._qty > 0) {
+//           await Product.decrement(
+//             { physical_qty: snap._qty, available_qty: snap._qty },
+//             { where: { id: snap._productId }, transaction: t }
+//           );
+//         }
+//       }
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  STEP 3: Recalculate totals
+//     // ─────────────────────────────────────────────
+//     let discountAmount = 0;
+//     if (newDiscountType === 'percent') {
+//       discountAmount = subtotal * (newDiscountValue / 100);
+//     } else {
+//       discountAmount = newDiscountValue;
+//     }
+//     discountAmount = Math.min(discountAmount, subtotal);
+
+//     const mazdooriAmount = req.body.mazdoori_amount != null
+//       ? parseFloat(req.body.mazdoori_amount)
+//       : parseFloat(sale.mazdoori_amount || 0);
+
+//     const grandTotal = subtotal - discountAmount + mazdooriAmount; // mazdoori included
+
+//     const newAmountPaid = amount_paid != null
+//       ? parseFloat(amount_paid)
+//       : parseFloat(sale.amount_paid);
+
+//     const newStatus =
+//       payment_status ??
+//       (newAmountPaid >= grandTotal
+//         ? 'paid'
+//         : newAmountPaid > 0
+//         ? 'partial'
+//         : 'unpaid');
+
+//     const isCredit = payment_method === 'credit';
+
+//     // ─────────────────────────────────────────────
+//     //  STEP 4: Update sale record
+//     // ─────────────────────────────────────────────
+//     await sale.update(
+//       {
+//         sale_category: sale_category ?? sale.sale_category,
+//         customer_id: newCustomerId,
+//         sale_date: sale_date ?? sale.sale_date,
+//         due_date: due_date !== undefined ? due_date : sale.due_date,
+//         subtotal,
+//         discount_type: newDiscountType,
+//         discount_value: newDiscountValue,
+//         discount_amount: discountAmount,
+//         mazdoori_amount: mazdooriAmount,
+//         grand_total: grandTotal,
+//         amount_paid: newAmountPaid,
+//         change_amount: Math.max(newAmountPaid - grandTotal, 0),
+//         payment_method,
+//         payment_status: newStatus,
+//         notes: notes !== undefined ? notes : sale.notes,
+//         reference: reference !== undefined ? reference : sale.reference,
+//       },
+//       { transaction: t }
+//     );
+
+//     // ─────────────────────────────────────────────
+//     //  STEP 5: Create fresh ledger entries for new customer
+//     //  ✅ These are now the ONLY ledger rows for this sale — clean replacement,
+//     //  no adjustment/reversal rows left behind from Step 1.
+//     // ─────────────────────────────────────────────
+//     if (newCustomerId) {
+//       const unpaidAmount = isCredit ? grandTotal : (grandTotal - newAmountPaid);
+//       const saleAmountForLedger = isCredit ? grandTotal : unpaidAmount;
+
+//       // Sale credit entry (customer owes this amount)
+//       if (saleAmountForLedger > 0) {
+//         await createLedgerEntry({
+//           customerId: newCustomerId,
+//           date: sale_date || sale.sale_date,
+//           transactionType: 'sale',
+//           referenceId: sale.id,
+//           referenceNumber: sale.reference || sale.invoice_number,
+//           description: `Sale ${sale.invoice_number} - ${sale.sale_type === 'invoice' ? 'Invoice' : 'POS'}${isCredit ? ' (Credit)' : ''}${isSarya ? ' [SARYA]' : ''}`,
+//           debit: 0,
+//           credit: saleAmountForLedger,
+//           transaction: t,
+//         });
+//       }
+
+//       // Payment debit entry (if paid amount > 0)
+//       if (newAmountPaid > 0 && !isCredit) {
+//         await createLedgerEntry({
+//           customerId: newCustomerId,
+//           date: sale_date || sale.sale_date,
+//           transactionType: 'payment',
+//           referenceId: sale.id,
+//           referenceNumber: sale.reference || sale.invoice_number,
+//           description: `Payment for ${sale.invoice_number} (${payment_method})`,
+//           debit: newAmountPaid,
+//           credit: 0,
+//           transaction: t,
+//         });
+//       }
+
+//       // Update new customer balance
+//       const newFinalBalance = await getCustomerBalance(newCustomerId, t);
+//       await Customer.update(
+//         { balance: newFinalBalance },
+//         { where: { id: newCustomerId }, transaction: t }
+//       );
+//     }
+
+//     await t.commit();
+
+//     // ─────────────────────────────────────────────
+//     //  Return updated sale with relations
+//     // ─────────────────────────────────────────────
+//     const updated = await Sale.findByPk(id, {
+//       include: [
+//         {
+//           model: Customer,
+//           as: 'customer',
+//           attributes: ['id', 'name', 'contact'],
+//         },
+//         {
+//           model: SaleItem,
+//           as: 'items',
+//           include: [
+//             {
+//               model: Product,
+//               as: 'product',
+//               attributes: ['id', 'item_name', 'barcode'],
+//               include: [
+//                 { model: Unit, as: 'unit', attributes: ['id', 'name', 'symbol'] },
+//               ],
+//             },
+//           ],
+//         },
+//       ],
+//     });
+
+//     res.json({ success: true, message: 'Sale updated successfully', data: updated });
+//   } catch (error) {
+//     await t.rollback();
+//     console.error('Update sale error:', error);
+//     res.status(500).json({ success: false, message: 'Server error', error: error.message });
+//   }
+// };
+
+// exports.deleteSale = async (req, res) => {
+//   const t = await sequelize.transaction();
+//   try {
+//     const { id } = req.params;
+
+//     const sale = await Sale.findByPk(id, {
+//       include: [
+//         { model: SaleItem, as: 'items' },
+//         { model: Customer, as: 'customer' }
+//       ],
+//       transaction: t, // ✅ FIX: this findByPk was missing the transaction before
+//     });
+
+//     if (!sale) {
+//       await t.rollback();
+//       return res.status(404).json({ success: false, message: 'Sale not found' });
+//     }
+
+//     const isSarya = sale.sale_category === 'sarya';
+
+//     // Restore stock for FILLED mode only
+//     if (!isSarya) {
+//       for (const item of sale.items) {
+//         await Product.increment(
+//           { physical_qty: item.quantity, available_qty: item.quantity },
+//           { where: { id: item.product_id }, transaction: t }
+//         );
+//       }
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  Handle customer ledger entries — DELETE all entries tied to this sale
+//     // ─────────────────────────────────────────────
+//     if (sale.customer_id) {
+//       // ✅ FIX: match by reference_id ONLY. reference_number is unreliable here —
+//       // it can be the user-provided `reference`, the invoice_number, or (for
+//       // reversal/adjustment entries created during an edit) may not match the
+//       // invoice_number at all. reference_id is always sale.id, so it is the
+//       // only safe way to find every ledger row that belongs to this sale
+//       // (sale entry, payment entries, and any adjustment/reversal entries
+//       // created by a prior edit).
+//       const ledgerEntries = await CustomerLedger.findAll({
+//         where: {
+//           customer_id: sale.customer_id,
+//           reference_id: sale.id,
+//         },
+//         transaction: t,
+//       });
+
+//       if (ledgerEntries.length > 0) {
+//         await CustomerLedger.destroy({
+//           where: {
+//             customer_id: sale.customer_id,
+//             reference_id: sale.id,
+//           },
+//           transaction: t,
+//         });
+//       }
+
+//       // Recalculate customer balance from remaining ledger entries
+//       // (must be ordered by date/id the same way createLedgerEntry expects,
+//       // so the running balance stays consistent)
+//       const remainingEntries = await CustomerLedger.findAll({
+//         where: { customer_id: sale.customer_id },
+//         order: [['date', 'ASC'], ['id', 'ASC']],
+//         transaction: t,
+//       });
+
+//       let newBalance = 0;
+//       for (const entry of remainingEntries) {
+//         newBalance = newBalance + parseFloat(entry.credit) - parseFloat(entry.debit);
+//         await entry.update({ balance: newBalance.toFixed(2) }, { transaction: t });
+//       }
+
+//       // Update customer with new balance
+//       await Customer.update(
+//         { balance: newBalance.toFixed(2) },
+//         { where: { id: sale.customer_id }, transaction: t }
+//       );
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  Delete cashbook entries tied to this sale
+//     // ─────────────────────────────────────────────
+//     const cashbookEntries = await SimpleCashbook.findAll({
+//       where: {
+//         source_type: 'customer_payment',
+//         reference_id: sale.id,
+//       },
+//       transaction: t,
+//     });
+
+//     if (cashbookEntries.length > 0) {
+//       await SimpleCashbook.destroy({
+//         where: {
+//           source_type: 'customer_payment',
+//           reference_id: sale.id,
+//         },
+//         transaction: t,
+//       });
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  Delete cheque records tied to this sale
+//     // ─────────────────────────────────────────────
+//     const chequeEntries = await Cheque.findAll({
+//       where: {
+//         sale_id: sale.id,
+//       },
+//       transaction: t,
+//     });
+
+//     if (chequeEntries.length > 0) {
+//       await Cheque.destroy({
+//         where: {
+//           sale_id: sale.id,
+//         },
+//         transaction: t,
+//       });
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  Delete bank transactions tied to this sale
+//     //  (kept matching on invoice_number since bank transactions for a sale's
+//     //  direct payment recording use sale.reference || sale.invoice_number —
+//     //  matching both keeps old data compatible)
+//     // ─────────────────────────────────────────────
+//     const bankTxWhere = {
+//       [Op.or]: [
+//         { reference_number: sale.invoice_number },
+//         ...(sale.reference ? [{ reference_number: sale.reference }] : []),
+//       ],
+//     };
+
+//     const bankTransactions = await BankTransaction.findAll({
+//       where: bankTxWhere,
+//       transaction: t,
+//     });
+
+//     if (bankTransactions.length > 0) {
+//       // Reverse bank balances before deleting transactions
+//       for (const bankTx of bankTransactions) {
+//         if (bankTx.transaction_type === 'in') {
+//           // Decrease bank balance since we're removing this incoming transaction
+//           const bank = await Bank.findByPk(bankTx.bank_id, { transaction: t });
+//           if (bank) {
+//             const newBankBalance = parseFloat(bank.balance) - parseFloat(bankTx.amount);
+//             await bank.update({ balance: newBankBalance.toFixed(2) }, { transaction: t });
+//           }
+//         }
+//       }
+
+//       await BankTransaction.destroy({
+//         where: bankTxWhere,
+//         transaction: t,
+//       });
+//     }
+
+//     // Delete sale items and sale
+//     await SaleItem.destroy({ where: { sale_id: id }, transaction: t });
+//     await sale.destroy({ transaction: t });
+
+//     await t.commit();
+
+//     res.json({
+//       success: true,
+//       message: 'Sale voided successfully with all related records deleted'
+//     });
+//   } catch (error) {
+//     await t.rollback();
+//     console.error('Delete sale error:', error);
+//     res.status(500).json({ success: false, message: 'Server error', error: error.message });
+//   }
+// };
 exports.updateSale = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -778,6 +1299,52 @@ exports.updateSale = async (req, res) => {
         { balance: oldRunningBalance.toFixed(2) },
         { where: { id: oldCustomerId }, transaction: t }
       );
+    }
+
+    // ─────────────────────────────────────────────
+    //  STEP 1b: Reverse/remove old bank transactions tied to this sale
+    //  ✅ FIX: previously, changing a sale's payment method away from
+    //  bank/slip (e.g. bank → credit), or editing the sale in any way,
+    //  left the old BankTransaction row orphaned — still affecting the
+    //  bank's balance, and later confusing deleteSale's matching logic.
+    //  Now matched via source_type/source_id (the model's existing
+    //  polymorphic FK) instead of fuzzy reference_number string matching.
+    // ─────────────────────────────────────────────
+    const oldBankTransactions = await BankTransaction.findAll({
+      where: {
+        source_type: 'customer_payment',
+        source_id: sale.id,
+      },
+      transaction: t,
+    });
+
+    for (const bankTx of oldBankTransactions) {
+      const bank = await Bank.findByPk(bankTx.bank_id, { transaction: t });
+      if (bank) {
+        const reversedBalance = bankTx.transaction_type === 'in'
+          ? parseFloat(bank.balance) - parseFloat(bankTx.amount)
+          : parseFloat(bank.balance) + parseFloat(bankTx.amount);
+
+        if (reversedBalance < 0) {
+          await t.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Cannot update this sale: reversing its previous bank transaction of Rs ${parseFloat(bankTx.amount).toFixed(2)} from "${bank.name}" would take its balance negative (current: Rs ${parseFloat(bank.balance).toFixed(2)}). Add funds to "${bank.name}" first, or adjust its balance manually.`,
+          });
+        }
+
+        await bank.update({ balance: reversedBalance.toFixed(2) }, { transaction: t });
+      }
+    }
+
+    if (oldBankTransactions.length > 0) {
+      await BankTransaction.destroy({
+        where: {
+          source_type: 'customer_payment',
+          source_id: sale.id,
+        },
+        transaction: t,
+      });
     }
 
     // ─────────────────────────────────────────────
@@ -1047,6 +1614,7 @@ exports.updateSale = async (req, res) => {
   }
 };
 
+
 // exports.deleteSale = async (req, res) => {
 //   const t = await sequelize.transaction();
 //   try {
@@ -1194,6 +1762,22 @@ exports.updateSale = async (req, res) => {
 //           const bank = await Bank.findByPk(bankTx.bank_id, { transaction: t });
 //           if (bank) {
 //             const newBankBalance = parseFloat(bank.balance) - parseFloat(bankTx.amount);
+
+//             // ✅ FIX: same rule enforced everywhere else in the app
+//             // (transferBetweenBanks, addTransaction, recordBankPaymentOut) —
+//             // never push a bank balance negative. If the bank's balance has
+//             // already moved (spent elsewhere) since this deposit was
+//             // recorded, refuse the void with a clear message instead of
+//             // letting Sequelize's `min: 0` validator throw an unhandled
+//             // ValidationError deep inside the transaction.
+//             if (newBankBalance < 0) {
+//               await t.rollback();
+//               return res.status(400).json({
+//                 success: false,
+//                 message: `Cannot void this sale: reversing its deposit of Rs ${parseFloat(bankTx.amount).toFixed(2)} from "${bank.name}" would take its balance negative (current balance: Rs ${parseFloat(bank.balance).toFixed(2)}). Add funds to "${bank.name}" first, or adjust its balance manually, then try voiding again.`,
+//               });
+//             }
+
 //             await bank.update({ balance: newBankBalance.toFixed(2) }, { transaction: t });
 //           }
 //         }
@@ -1221,6 +1805,7 @@ exports.updateSale = async (req, res) => {
 //     res.status(500).json({ success: false, message: 'Server error', error: error.message });
 //   }
 // };
+
 exports.deleteSale = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -1344,19 +1929,18 @@ exports.deleteSale = async (req, res) => {
 
     // ─────────────────────────────────────────────
     //  Delete bank transactions tied to this sale
-    //  (kept matching on invoice_number since bank transactions for a sale's
-    //  direct payment recording use sale.reference || sale.invoice_number —
-    //  matching both keeps old data compatible)
+    //  ✅ FIX: match by source_type/source_id (the model's existing
+    //  polymorphic FK), not reference_number string matching. The old
+    //  approach was fragile — reference values get reused across sales
+    //  and manual entries, and became stale after a sale's payment
+    //  method was edited (see STEP 1b in updateSale, which now also
+    //  cleans these up on edit instead of leaving them orphaned).
     // ─────────────────────────────────────────────
-    const bankTxWhere = {
-      [Op.or]: [
-        { reference_number: sale.invoice_number },
-        ...(sale.reference ? [{ reference_number: sale.reference }] : []),
-      ],
-    };
-
     const bankTransactions = await BankTransaction.findAll({
-      where: bankTxWhere,
+      where: {
+        source_type: 'customer_payment',
+        source_id: sale.id,
+      },
       transaction: t,
     });
 
@@ -1369,7 +1953,7 @@ exports.deleteSale = async (req, res) => {
           if (bank) {
             const newBankBalance = parseFloat(bank.balance) - parseFloat(bankTx.amount);
 
-            // ✅ FIX: same rule enforced everywhere else in the app
+            // ✅ Same rule enforced everywhere else in the app
             // (transferBetweenBanks, addTransaction, recordBankPaymentOut) —
             // never push a bank balance negative. If the bank's balance has
             // already moved (spent elsewhere) since this deposit was
@@ -1390,7 +1974,10 @@ exports.deleteSale = async (req, res) => {
       }
 
       await BankTransaction.destroy({
-        where: bankTxWhere,
+        where: {
+          source_type: 'customer_payment',
+          source_id: sale.id,
+        },
         transaction: t,
       });
     }
@@ -1411,6 +1998,7 @@ exports.deleteSale = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };
+
 
 exports.getDailySummary = async (req, res) => {
   try {
@@ -1581,18 +2169,32 @@ exports.recordPayment = async (req, res) => {
 
       let bankDescription = notes || '';
 
-      bankTransaction = await BankTransaction.create({
-        bank_id: bank_id,
-        transaction_type: 'in',
-        amount: paymentAmount.toFixed(2),
-        description: bankDescription,
-        reference_number: (payment_method === 'slip' && slip_number)
-          ? slip_number
-          : (sale.reference || sale.invoice_number),
-        balance_after: newBalance.toFixed(2),
-        created_by: req.user?.id,
-        transaction_date: payment_date ? new Date(payment_date) : new Date()
-      }, { transaction: t });
+      // bankTransaction = await BankTransaction.create({
+      //   bank_id: bank_id,
+      //   transaction_type: 'in',
+      //   amount: paymentAmount.toFixed(2),
+      //   description: bankDescription,
+      //   reference_number: (payment_method === 'slip' && slip_number)
+      //     ? slip_number
+      //     : (sale.reference || sale.invoice_number),
+      //   balance_after: newBalance.toFixed(2),
+      //   created_by: req.user?.id,
+      //   transaction_date: payment_date ? new Date(payment_date) : new Date()
+      // }, { transaction: t });
+          bankTransaction = await BankTransaction.create({
+      bank_id: bank_id,
+      source_type: 'customer_payment',   // ✅ FIX: use the existing polymorphic link
+      source_id: sale.id,                // ✅ FIX: real reference to this sale
+      transaction_type: 'in',
+      amount: paymentAmount.toFixed(2),
+      description: bankDescription,
+      reference_number: (payment_method === 'slip' && slip_number)
+        ? slip_number
+        : (sale.reference || sale.invoice_number),
+      balance_after: newBalance.toFixed(2),
+      created_by: req.user?.id,
+      transaction_date: payment_date ? new Date(payment_date) : new Date()
+    }, { transaction: t });
     }
 
     // ═══════════════════════════════════════════════════════════════════════
