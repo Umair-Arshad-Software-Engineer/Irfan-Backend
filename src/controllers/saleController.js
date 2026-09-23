@@ -1047,6 +1047,180 @@ exports.updateSale = async (req, res) => {
   }
 };
 
+// exports.deleteSale = async (req, res) => {
+//   const t = await sequelize.transaction();
+//   try {
+//     const { id } = req.params;
+
+//     const sale = await Sale.findByPk(id, {
+//       include: [
+//         { model: SaleItem, as: 'items' },
+//         { model: Customer, as: 'customer' }
+//       ],
+//       transaction: t, // ✅ FIX: this findByPk was missing the transaction before
+//     });
+
+//     if (!sale) {
+//       await t.rollback();
+//       return res.status(404).json({ success: false, message: 'Sale not found' });
+//     }
+
+//     const isSarya = sale.sale_category === 'sarya';
+
+//     // Restore stock for FILLED mode only
+//     if (!isSarya) {
+//       for (const item of sale.items) {
+//         await Product.increment(
+//           { physical_qty: item.quantity, available_qty: item.quantity },
+//           { where: { id: item.product_id }, transaction: t }
+//         );
+//       }
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  Handle customer ledger entries — DELETE all entries tied to this sale
+//     // ─────────────────────────────────────────────
+//     if (sale.customer_id) {
+//       // ✅ FIX: match by reference_id ONLY. reference_number is unreliable here —
+//       // it can be the user-provided `reference`, the invoice_number, or (for
+//       // reversal/adjustment entries created during an edit) may not match the
+//       // invoice_number at all. reference_id is always sale.id, so it is the
+//       // only safe way to find every ledger row that belongs to this sale
+//       // (sale entry, payment entries, and any adjustment/reversal entries
+//       // created by a prior edit).
+//       const ledgerEntries = await CustomerLedger.findAll({
+//         where: {
+//           customer_id: sale.customer_id,
+//           reference_id: sale.id,
+//         },
+//         transaction: t,
+//       });
+
+//       if (ledgerEntries.length > 0) {
+//         await CustomerLedger.destroy({
+//           where: {
+//             customer_id: sale.customer_id,
+//             reference_id: sale.id,
+//           },
+//           transaction: t,
+//         });
+//       }
+
+//       // Recalculate customer balance from remaining ledger entries
+//       // (must be ordered by date/id the same way createLedgerEntry expects,
+//       // so the running balance stays consistent)
+//       const remainingEntries = await CustomerLedger.findAll({
+//         where: { customer_id: sale.customer_id },
+//         order: [['date', 'ASC'], ['id', 'ASC']],
+//         transaction: t,
+//       });
+
+//       let newBalance = 0;
+//       for (const entry of remainingEntries) {
+//         newBalance = newBalance + parseFloat(entry.credit) - parseFloat(entry.debit);
+//         await entry.update({ balance: newBalance.toFixed(2) }, { transaction: t });
+//       }
+
+//       // Update customer with new balance
+//       await Customer.update(
+//         { balance: newBalance.toFixed(2) },
+//         { where: { id: sale.customer_id }, transaction: t }
+//       );
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  Delete cashbook entries tied to this sale
+//     // ─────────────────────────────────────────────
+//     const cashbookEntries = await SimpleCashbook.findAll({
+//       where: {
+//         source_type: 'customer_payment',
+//         reference_id: sale.id,
+//       },
+//       transaction: t,
+//     });
+
+//     if (cashbookEntries.length > 0) {
+//       await SimpleCashbook.destroy({
+//         where: {
+//           source_type: 'customer_payment',
+//           reference_id: sale.id,
+//         },
+//         transaction: t,
+//       });
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  Delete cheque records tied to this sale
+//     // ─────────────────────────────────────────────
+//     const chequeEntries = await Cheque.findAll({
+//       where: {
+//         sale_id: sale.id,
+//       },
+//       transaction: t,
+//     });
+
+//     if (chequeEntries.length > 0) {
+//       await Cheque.destroy({
+//         where: {
+//           sale_id: sale.id,
+//         },
+//         transaction: t,
+//       });
+//     }
+
+//     // ─────────────────────────────────────────────
+//     //  Delete bank transactions tied to this sale
+//     //  (kept matching on invoice_number since bank transactions for a sale's
+//     //  direct payment recording use sale.reference || sale.invoice_number —
+//     //  matching both keeps old data compatible)
+//     // ─────────────────────────────────────────────
+//     const bankTxWhere = {
+//       [Op.or]: [
+//         { reference_number: sale.invoice_number },
+//         ...(sale.reference ? [{ reference_number: sale.reference }] : []),
+//       ],
+//     };
+
+//     const bankTransactions = await BankTransaction.findAll({
+//       where: bankTxWhere,
+//       transaction: t,
+//     });
+
+//     if (bankTransactions.length > 0) {
+//       // Reverse bank balances before deleting transactions
+//       for (const bankTx of bankTransactions) {
+//         if (bankTx.transaction_type === 'in') {
+//           // Decrease bank balance since we're removing this incoming transaction
+//           const bank = await Bank.findByPk(bankTx.bank_id, { transaction: t });
+//           if (bank) {
+//             const newBankBalance = parseFloat(bank.balance) - parseFloat(bankTx.amount);
+//             await bank.update({ balance: newBankBalance.toFixed(2) }, { transaction: t });
+//           }
+//         }
+//       }
+
+//       await BankTransaction.destroy({
+//         where: bankTxWhere,
+//         transaction: t,
+//       });
+//     }
+
+//     // Delete sale items and sale
+//     await SaleItem.destroy({ where: { sale_id: id }, transaction: t });
+//     await sale.destroy({ transaction: t });
+
+//     await t.commit();
+
+//     res.json({
+//       success: true,
+//       message: 'Sale voided successfully with all related records deleted'
+//     });
+//   } catch (error) {
+//     await t.rollback();
+//     console.error('Delete sale error:', error);
+//     res.status(500).json({ success: false, message: 'Server error', error: error.message });
+//   }
+// };
 exports.deleteSale = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -1194,6 +1368,22 @@ exports.deleteSale = async (req, res) => {
           const bank = await Bank.findByPk(bankTx.bank_id, { transaction: t });
           if (bank) {
             const newBankBalance = parseFloat(bank.balance) - parseFloat(bankTx.amount);
+
+            // ✅ FIX: same rule enforced everywhere else in the app
+            // (transferBetweenBanks, addTransaction, recordBankPaymentOut) —
+            // never push a bank balance negative. If the bank's balance has
+            // already moved (spent elsewhere) since this deposit was
+            // recorded, refuse the void with a clear message instead of
+            // letting Sequelize's `min: 0` validator throw an unhandled
+            // ValidationError deep inside the transaction.
+            if (newBankBalance < 0) {
+              await t.rollback();
+              return res.status(400).json({
+                success: false,
+                message: `Cannot void this sale: reversing its deposit of Rs ${parseFloat(bankTx.amount).toFixed(2)} from "${bank.name}" would take its balance negative (current balance: Rs ${parseFloat(bank.balance).toFixed(2)}). Add funds to "${bank.name}" first, or adjust its balance manually, then try voiding again.`,
+              });
+            }
+
             await bank.update({ balance: newBankBalance.toFixed(2) }, { transaction: t });
           }
         }
