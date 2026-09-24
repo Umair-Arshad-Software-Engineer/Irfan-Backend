@@ -16,6 +16,18 @@ const { recalculateBalances } = require('./supplierLedgerController');
 const { createCashbookEntry } = require('./cashbookController');
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HELPER: Resolve the "effective" date for a record.
+// Use the caller-supplied entry_date (the date picked in the app) whenever
+// it's provided; otherwise fall back to the current server time.
+// This must be used for EVERY date field that represents "when this
+// transaction happened" — entry_time, transaction_date, bank transaction
+// date, cashbook entry date — not just the DailyExpense row itself.
+// ─────────────────────────────────────────────────────────────────────────────
+function resolveEffectiveDate(entry_date) {
+  return entry_date ? new Date(entry_date) : new Date();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Recalculate session totals and closing balance
 // ─────────────────────────────────────────────────────────────────────────────
 async function recalculateSession(sessionId, dbTransaction) {
@@ -403,6 +415,13 @@ exports.addExpense = async (req, res) => {
       entry_date,
     } = req.body;
 
+    // The date this transaction should be recorded against, everywhere:
+    // DailyExpense.entry_time, BankTransaction.transaction_date, and the
+    // cashbook entry_date. Previously only entry_time honored entry_date;
+    // the other two silently used "now", which is why bank/cashbook views
+    // could show today's date even when a past date was picked.
+    const effectiveDate = resolveEffectiveDate(entry_date);
+
     // ── Validate ──
     if (!description || !description.trim()) {
       await dbTransaction.rollback();
@@ -473,7 +492,7 @@ exports.addExpense = async (req, res) => {
         cheque_date: cheque_date || null,
         cheque_id: cheque_id || null,
         reference_number: reference_number || null,
-        entry_time: entry_date ? new Date(entry_date) : new Date(),
+        entry_time: effectiveDate,
         created_by: req.user?.id,
       },
       { transaction: dbTransaction }
@@ -492,7 +511,7 @@ exports.addExpense = async (req, res) => {
           reference_number: reference_number || null,
           balance_after: newBalance.toFixed(2),
           created_by: req.user?.id,
-          transaction_date: new Date(),
+          transaction_date: effectiveDate,
         },
         { transaction: dbTransaction }
       );
@@ -501,7 +520,7 @@ exports.addExpense = async (req, res) => {
     // ── Create cashbook entry for cash expenses ──
     if (payment_method === 'cash') {
       const cbEntry = await createCashbookEntry({
-        entry_date: new Date(),
+        entry_date: effectiveDate,
         entry_type: 'cash_out',
         source_type: 'daily_expense',
         reference_id: entry.id,
@@ -559,6 +578,14 @@ exports.addSupplierPayment = async (req, res) => {
       reference_number,
       entry_date,
     } = req.body;
+
+    // This is the fix: previously the SupplierLedger.transaction_date and
+    // the cashbook entry_date were hardcoded to `new Date()`, so a vendor
+    // payment backdated in the app would still show up as "today" in the
+    // supplier ledger / statement and in the cashbook, even though the
+    // DailyExpense row itself had the correct entry_time. Every date field
+    // below now shares this single resolved value.
+    const effectiveDate = resolveEffectiveDate(entry_date);
 
     if (!supplier_id) {
       await dbTransaction.rollback();
@@ -633,7 +660,7 @@ exports.addSupplierPayment = async (req, res) => {
           amount: paymentAmount.toFixed(2),
           payee_payer_name: supplier.name,
           description: description || `Payment to supplier: ${supplier.name}`,
-          issue_date: cheque_date || new Date().toISOString().slice(0, 10),
+          issue_date: cheque_date || effectiveDate.toISOString().slice(0, 10),
           due_date: cheque_date || null,
           supplier_id,
         },
@@ -666,7 +693,7 @@ exports.addSupplierPayment = async (req, res) => {
         credit: '0.00',
         balance: '0.00',
         description: finalDescription,
-        transaction_date: new Date(),
+        transaction_date: effectiveDate,
         payment_method,
         bank_name: bank_name || null,
         bank_id: bank_id || null,
@@ -704,7 +731,7 @@ exports.addSupplierPayment = async (req, res) => {
           reference_number: reference_number || null,
           balance_after: newBalance.toFixed(2),
           created_by: req.user?.id,
-          transaction_date: new Date(),
+          transaction_date: effectiveDate,
         },
         { transaction: dbTransaction }
       );
@@ -713,7 +740,7 @@ exports.addSupplierPayment = async (req, res) => {
     // ── Cashbook for cash payments ──
     if (payment_method === 'cash') {
       const cbEntry = await createCashbookEntry({
-        entry_date: new Date(),
+        entry_date: effectiveDate,
         entry_type: 'cash_out',
         source_type: 'supplier_payment',
         reference_id: ledgerEntry.id,
@@ -746,7 +773,7 @@ exports.addSupplierPayment = async (req, res) => {
         reference_number: reference_number || null,
         supplier_id,
         supplier_ledger_id: ledgerEntry.id,
-        entry_time: entry_date ? new Date(entry_date) : new Date(),
+        entry_time: effectiveDate,
         created_by: req.user?.id,
       },
       { transaction: dbTransaction }
@@ -806,6 +833,10 @@ exports.addBillPayment = async (req, res) => {
       bill_image,
       entry_date,
     } = req.body;
+
+    // Same fix as addExpense/addSupplierPayment: use the picked date
+    // everywhere a "when did this happen" field is written.
+    const effectiveDate = resolveEffectiveDate(entry_date);
 
     if (!bill_type) {
       await dbTransaction.rollback();
@@ -880,7 +911,7 @@ exports.addBillPayment = async (req, res) => {
         bill_number: bill_number || null,
         consumer_number: consumer_number || null,
         bill_image: bill_image || null,
-        entry_time: entry_date ? new Date(entry_date) : new Date(),
+        entry_time: effectiveDate,
         created_by: req.user?.id,
       },
       { transaction: dbTransaction }
@@ -899,7 +930,7 @@ exports.addBillPayment = async (req, res) => {
           reference_number: reference_number || null,
           balance_after: newBalance.toFixed(2),
           created_by: req.user?.id,
-          transaction_date: new Date(),
+          transaction_date: effectiveDate,
         },
         { transaction: dbTransaction }
       );
@@ -908,7 +939,7 @@ exports.addBillPayment = async (req, res) => {
     // ── Create cashbook entry for cash payments ──
     if (payment_method === 'cash') {
       const cbEntry = await createCashbookEntry({
-        entry_date: new Date(),
+        entry_date: effectiveDate,
         entry_type: 'cash_out',
         source_type: 'bill_payment',
         reference_id: entry.id,
