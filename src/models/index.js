@@ -34,8 +34,11 @@ const initSalaryPayment = require('./SalaryPayment');
 const initAdvancePayment = require('./AdvancePayment');
 const initEmployeeExpense = require('./EmployeeExpense');
 const initContractWorkEntry = require('./ContractWorkEntry');
-const initBuildTransaction = require('./BuildTransaction'); // ← ADD THIS
+const initBuildTransaction = require('./BuildTransaction');
+const initSupplierReturn = require('./SupplierReturn');           // ← NEW
+const initSupplierReturnItem = require('./SupplierReturnItem');   // ← NEW
 
+// ── Initialize models ────────────────────────────────────────────────────────
 const Category = initCategory(sequelize);
 const Subcategory = initSubcategory(sequelize);
 const Unit = initUnit(sequelize);
@@ -67,7 +70,9 @@ const SalaryPayment = initSalaryPayment(sequelize);
 const AdvancePayment = initAdvancePayment(sequelize);
 const EmployeeExpense = initEmployeeExpense(sequelize);
 const ContractWorkEntry = initContractWorkEntry(sequelize);
-const BuildTransaction = initBuildTransaction(sequelize); // ← ADD THIS
+const BuildTransaction = initBuildTransaction(sequelize);
+const SupplierReturn = initSupplierReturn(sequelize);            // ← NEW
+const SupplierReturnItem = initSupplierReturnItem(sequelize);    // ← NEW
 
 // ── Associations ─────────────────────────────────────────────────────────────
 
@@ -94,6 +99,7 @@ CustomerLedger.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' }
 
 Supplier.hasMany(Product, { foreignKey: 'supplier_id', as: 'products' });
 Supplier.hasMany(SupplierLedger, { foreignKey: 'supplier_id', as: 'ledgerEntries' });
+Supplier.hasMany(SupplierReturn, { foreignKey: 'supplier_id', as: 'supplierReturns' }); // ← NEW
 
 SupplierLedger.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
 
@@ -154,82 +160,82 @@ Employee.hasMany(SalaryPayment, { foreignKey: 'employee_id', as: 'salaryPayments
 SalaryPayment.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 
 // AdvancePayment associations - employee side
-Employee.hasMany(AdvancePayment, { 
-  foreignKey: 'employee_id', 
-  as: 'advances', 
-  onDelete: 'CASCADE' 
+Employee.hasMany(AdvancePayment, {
+  foreignKey: 'employee_id',
+  as: 'advances',
+  onDelete: 'CASCADE'
 });
-AdvancePayment.belongsTo(Employee, { 
-  foreignKey: 'employee_id', 
-  as: 'employee' 
+AdvancePayment.belongsTo(Employee, {
+  foreignKey: 'employee_id',
+  as: 'employee'
 });
 
 // EmployeeExpense associations - employee side
-Employee.hasMany(EmployeeExpense, { 
-  foreignKey: 'employee_id', 
-  as: 'expenses', 
-  onDelete: 'CASCADE' 
+Employee.hasMany(EmployeeExpense, {
+  foreignKey: 'employee_id',
+  as: 'expenses',
+  onDelete: 'CASCADE'
 });
-EmployeeExpense.belongsTo(Employee, { 
-  foreignKey: 'employee_id', 
-  as: 'employee' 
+EmployeeExpense.belongsTo(Employee, {
+  foreignKey: 'employee_id',
+  as: 'employee'
 });
 
 // ── Contract Work associations ────────────────────────────────────────────────
-Employee.hasMany(ContractWorkEntry, { 
-  foreignKey: 'employee_id', 
-  as: 'contractWorkEntries', 
-  onDelete: 'CASCADE' 
+Employee.hasMany(ContractWorkEntry, {
+  foreignKey: 'employee_id',
+  as: 'contractWorkEntries',
+  onDelete: 'CASCADE'
 });
-ContractWorkEntry.belongsTo(Employee, { 
-  foreignKey: 'employee_id', 
-  as: 'employee' 
+ContractWorkEntry.belongsTo(Employee, {
+  foreignKey: 'employee_id',
+  as: 'employee'
 });
 
 // ── Salary Payment associations with recovered entries ──────────────────────
-// SalaryPayment has many recovered advances and expenses
-SalaryPayment.hasMany(AdvancePayment, { 
-  foreignKey: 'salary_payment_id', 
-  as: 'recoveredAdvances' 
+SalaryPayment.hasMany(AdvancePayment, {
+  foreignKey: 'salary_payment_id',
+  as: 'recoveredAdvances'
 });
-AdvancePayment.belongsTo(SalaryPayment, { 
-  foreignKey: 'salary_payment_id', 
-  as: 'salaryPayment' 
+AdvancePayment.belongsTo(SalaryPayment, {
+  foreignKey: 'salary_payment_id',
+  as: 'salaryPayment'
 });
 
-SalaryPayment.hasMany(EmployeeExpense, { 
-  foreignKey: 'salary_payment_id', 
-  as: 'recoveredExpenses' 
+SalaryPayment.hasMany(EmployeeExpense, {
+  foreignKey: 'salary_payment_id',
+  as: 'recoveredExpenses'
 });
-EmployeeExpense.belongsTo(SalaryPayment, { 
-  foreignKey: 'salary_payment_id', 
-  as: 'salaryPayment' 
+EmployeeExpense.belongsTo(SalaryPayment, {
+  foreignKey: 'salary_payment_id',
+  as: 'salaryPayment'
 });
 
 // ── Additional associations for balance tracking ────────────────────────────
-// These help with querying all transactions for an employee
-Employee.hasMany(AdvancePayment, { 
-  foreignKey: 'employee_id', 
-  as: 'allAdvances' 
+Employee.hasMany(AdvancePayment, {
+  foreignKey: 'employee_id',
+  as: 'allAdvances'
 });
-Employee.hasMany(EmployeeExpense, { 
-  foreignKey: 'employee_id', 
-  as: 'allExpenses' 
+Employee.hasMany(EmployeeExpense, {
+  foreignKey: 'employee_id',
+  as: 'allExpenses'
 });
 
 // ── BuildTransaction associations ────────────────────────────────────────────
-// BuildTransaction belongs to Product (the BOM product)
-BuildTransaction.belongsTo(Product, { 
-  foreignKey: 'product_id', 
-  as: 'product' 
+BuildTransaction.belongsTo(Product, {
+  foreignKey: 'product_id',
+  as: 'product'
 });
 
-// Product has many BuildTransactions
-Product.hasMany(BuildTransaction, { 
-  foreignKey: 'product_id', 
-  as: 'buildTransactions', 
-  onDelete: 'CASCADE' 
+Product.hasMany(BuildTransaction, {
+  foreignKey: 'product_id',
+  as: 'buildTransactions',
+  onDelete: 'CASCADE'
 });
+
+// ── Supplier Return associations ─────────────────────────────────────────────
+SupplierReturn.associate({ Supplier, SupplierReturnItem, PurchaseOrder, User });
+SupplierReturnItem.associate({ SupplierReturn, Product });
 
 // Cashbook / SimpleCashbook — standalone, no FK associations
 
@@ -237,7 +243,7 @@ module.exports = {
   // Core models
   sequelize,
   User,
-  
+
   // Inventory & Products
   Category,
   Subcategory,
@@ -247,20 +253,22 @@ module.exports = {
   Product,
   CustomerPrice,
   ProductImage,
-  
+
   // Purchasing
   PurchaseOrder,
   PurchaseOrderItem,
   PurchaseReceipt,
   PurchaseReceiptItem,
   SupplierLedger,
-  
+  SupplierReturn,        // ← NEW
+  SupplierReturnItem,    // ← NEW
+
   // Sales
   Sale,
   SaleItem,
   SaleImage,
   CustomerLedger,
-  
+
   // Banking
   Bank,
   BankTransaction,
@@ -268,11 +276,11 @@ module.exports = {
   Cheque,
   Cashbook,
   SimpleCashbook,
-  
+
   // Daily Expenses
   DailyExpenseSession,
   DailyExpense,
-  
+
   // HR & Payroll
   Employee,
   Attendance,
@@ -280,7 +288,7 @@ module.exports = {
   AdvancePayment,
   EmployeeExpense,
   ContractWorkEntry,
-  
+
   // BOM
-  BuildTransaction, // ← ADD THIS
+  BuildTransaction,
 };

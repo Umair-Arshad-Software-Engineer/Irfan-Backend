@@ -39,6 +39,7 @@ const salaryRoutes = require('./src/routes/salaryRoutes');
 const advanceRoutes = require('./src/routes/advanceRoutes');
 const empExpenseRoutes = require('./src/routes/empExpenseRoutes');
 const contractWorkRoutes = require('./src/routes/contractWorkRoutes'); // ← NEW
+const supplierReturnRoutes = require('./src/routes/supplierReturnRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -106,6 +107,7 @@ app.use('/api/cheques', chequeRoutes);
 app.use('/api/cashbook', cashbookRoutes);
 app.use('/api/simple-cashbook', simpleCashbookRoutes);
 app.use('/api/expense-sessions', expenseRoutes);
+app.use('/api/supplier-returns', supplierReturnRoutes);
 
 // ── Employee Routes ──────────────────────────────────────────────────────────
 app.use('/api/employees', employeeRoutes);

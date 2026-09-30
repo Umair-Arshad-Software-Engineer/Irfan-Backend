@@ -13,7 +13,7 @@ module.exports = (sequelize) => {
       references: { model: 'suppliers', key: 'id' }
     },
     reference_type: {
-      type: DataTypes.ENUM('purchase_receipt', 'payment', 'manual', 'reversal'),
+      type: DataTypes.ENUM('purchase_receipt', 'payment', 'manual', 'reversal', 'supplier_return'),
       allowNull: false
     },
     reference_id: {
