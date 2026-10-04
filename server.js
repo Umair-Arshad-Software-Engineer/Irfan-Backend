@@ -173,16 +173,8 @@ async function seedAdminUser() {
     await sequelize.authenticate();
     console.log('✅ Database connected');
 
-    // ✅ FIX: `sync({ alter: true })` on every start makes Sequelize re-issue
-    // `ALTER ... UNIQUE` on columns like sales.invoice_number, and MySQL adds
-    // a NEW duplicate unique index each time until it hits the 64-index limit
-    // ("Too many keys specified; max 64 keys allowed") and the server can no
-    // longer boot. Plain sync() only creates missing tables and never alters
-    // existing ones. If you really need an alter for a schema change, start
-    // once with  DB_SYNC_ALTER=true  and then remove it.
-    const syncOptions = process.env.DB_SYNC_ALTER === 'true' ? { alter: true } : {};
-    await sequelize.sync(syncOptions);
-    console.log(`✅ Database & tables synced${syncOptions.alter ? ' (alter)' : ''}`);
+    await sequelize.sync({ alter: true });
+    console.log('✅ Database & tables synced');
 
     await seedAdminUser();
 
@@ -192,18 +184,9 @@ async function seedAdminUser() {
     });
   } catch (err) {
     console.error('❌ Database error:', err);
-
-    // ✅ FIX: "Press any key to exit" only works with an interactive terminal.
-    // Under pm2 (no TTY) process.stdin.setRawMode doesn't exist and threw a
-    // TypeError. Only wait for a key when a TTY is present; otherwise exit so
-    // pm2 can restart the process.
-    if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
-      console.log('Press any key to exit...');
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-      process.stdin.on('data', process.exit.bind(process, 1));
-    } else {
-      process.exit(1);
-    }
+    console.log('Press any key to exit...');
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('data', process.exit.bind(process, 1));
   }
 })();
