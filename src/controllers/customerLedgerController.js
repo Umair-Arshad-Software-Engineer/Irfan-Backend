@@ -345,6 +345,8 @@ exports.addAdjustment = async (req, res) => {
       transactionType = 'payment';
     }
 
+    const isCheque = payment_method === 'cheque';
+
     const entry = await createLedgerEntry({
       customer_id: customerId,
       transaction_type: transactionType,
@@ -359,7 +361,9 @@ exports.addAdjustment = async (req, res) => {
       bank_id,
       cheque_number,
       cheque_date,
-      cheque_cleared: payment_method === 'cheque' ? false : null,
+      // ✅ cheque payments are always recorded as cleared
+      cheque_cleared: isCheque ? true : null,
+      cheque_cleared_date: isCheque ? transactionDate : null,
       transaction: t,
     });
 

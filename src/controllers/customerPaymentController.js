@@ -1,7 +1,5 @@
 // backend/src/controllers/customerPaymentController.js
 const { Op } = require('sequelize');
-// const { CustomerLedger, Customer, Bank, BankTransaction, Cheque, sequelize } = require('../models');
-// const { CustomerLedger, Customer, Bank, BankTransaction, Cheque, SimpleCashbook, sequelize } = require('../models');  // ← Add SimpleCashbook here
 const { 
   CustomerLedger, 
   Customer, 
@@ -9,7 +7,7 @@ const {
   BankTransaction, 
   Cheque, 
   SimpleCashbook, 
-  Sale,  // ← Add Sale model here
+  Sale,
   sequelize 
 } = require('../models');
 // Import ledger helpers (no circular dependency)
@@ -20,6 +18,8 @@ const { createSimpleCashbookEntry } = require('./simpleCashbookController');
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ✅ CREATE CUSTOMER PAYMENT + AUTO BANK TRANSACTION
+//    Cheque payments are recorded as CLEARED immediately (bank balance is
+//    credited right away, cheque status = cleared).
 // ═══════════════════════════════════════════════════════════════════════════
 exports.createCustomerPayment = async (req, res) => {
   const dbTransaction = await sequelize.transaction();
@@ -37,7 +37,7 @@ exports.createCustomerPayment = async (req, res) => {
       reference_number,
       description,
       transaction_date,
-      from_simple_cashbook, // ✅ new
+      from_simple_cashbook,
     } = req.body;
 
     // ── Validate required fields ──
@@ -68,6 +68,27 @@ exports.createCustomerPayment = async (req, res) => {
     }
 
     const paymentAmount = parseFloat(amount);
+    const isCheque = payment_method === 'cheque';
+    const paymentDateObj = transaction_date ? new Date(transaction_date) : new Date();
+    const paymentDateStr = paymentDateObj.toISOString().split('T')[0];
+
+    // ✅ Cheque is cleared on entry, so cheque number + bank are mandatory
+    if (isCheque) {
+      if (!cheque_number) {
+        await dbTransaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Cheque number is required for cheque payment'
+        });
+      }
+      if (!bank_id) {
+        await dbTransaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Bank is required for cheque payment'
+        });
+      }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 1: Validate bank if bank/cheque payment
@@ -75,7 +96,7 @@ exports.createCustomerPayment = async (req, res) => {
     let selectedBank = null;
     let finalBankName = bank_name;
     
-    if ((payment_method === 'bank' || payment_method === 'cheque') && bank_id) {
+    if ((payment_method === 'bank' || isCheque) && bank_id) {
       selectedBank = await Bank.findByPk(bank_id, { transaction: dbTransaction });
       
       if (!selectedBank) {
@@ -90,9 +111,69 @@ exports.createCustomerPayment = async (req, res) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 2: Create customer ledger entry using the helper function
+    // STEP 2: Update bank balance + bank transaction (bank AND cheque)
     // ═══════════════════════════════════════════════════════════════════════
+    let bankTransaction = null;
     
+    if (selectedBank && (payment_method === 'bank' || isCheque)) {
+      const newBankBalance = parseFloat(selectedBank.balance) + paymentAmount;
+      await selectedBank.update(
+        { balance: newBankBalance.toFixed(2) },
+        { transaction: dbTransaction }
+      );
+
+      bankTransaction = await BankTransaction.create({
+        bank_id: bank_id,
+        transaction_type: 'in',
+        amount: paymentAmount.toFixed(2),
+        description: isCheque
+          ? `Cheque cleared - #${cheque_number} from ${customer.name}`
+          : `Payment received from ${customer.name}`,
+        reference_number: isCheque ? cheque_number : (reference_number || null),
+        balance_after: newBankBalance.toFixed(2),
+        created_by: req.user?.id,
+        transaction_date: paymentDateObj
+      }, { transaction: dbTransaction });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 3: Cheque record — update existing (from frontend) or create it.
+    //         Always stored as CLEARED.
+    // ═══════════════════════════════════════════════════════════════════════
+    let chequeRecordId = cheque_id || null;
+    if (isCheque) {
+      const chequeFields = {
+        status: 'cleared',
+        cleared_date: paymentDateStr,
+        bank_transaction_id: bankTransaction?.id || null,
+        customer_id: customerId,
+        payee_payer_name: customer.name,
+        description: description || `Payment received from customer: ${customer.name}`,
+        amount: paymentAmount,
+        cheque_number: cheque_number,
+        due_date: cheque_date ? new Date(cheque_date) : null,
+      };
+
+      if (chequeRecordId) {
+        await Cheque.update(
+          chequeFields,
+          { where: { id: chequeRecordId }, transaction: dbTransaction }
+        );
+      } else {
+        const newCheque = await Cheque.create({
+          bank_id: bank_id,
+          cheque_type: 'received',
+          issue_date: paymentDateObj,
+          created_by: req.user?.id,
+          ...chequeFields,
+        }, { transaction: dbTransaction });
+        chequeRecordId = newCheque.id;
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 4: Create customer ledger entry (payment = DEBIT reduces balance)
+    // ═══════════════════════════════════════════════════════════════════════
     const methodLabels = {
       'cash': 'Cash Payment',
       'bank': 'Bank Transfer',
@@ -102,7 +183,6 @@ exports.createCustomerPayment = async (req, res) => {
 
     const methodLabel = methodLabels[payment_method] || payment_method;
     
-    // Auto-generate description if not provided
     const autoDesc = [
       `${methodLabel} from ${customer.name}`,
       finalBankName ? `| Bank: ${finalBankName}` : null,
@@ -112,145 +192,83 @@ exports.createCustomerPayment = async (req, res) => {
 
     const finalDescription = description?.trim() || autoDesc;
 
-    // Create ledger entry using the helper (payment = DEBIT reduces balance)
     const ledgerEntry = await createLedgerEntry({
       customer_id: customerId,
       transaction_type: 'payment',
-      reference_id: cheque_id || null,
+      reference_id: chequeRecordId || null,
       reference_number: reference_number || cheque_number || `PAY-${Date.now()}`,
       debit: paymentAmount,
       credit: 0,
       description: finalDescription,
-      transaction_date: transaction_date ? new Date(transaction_date) : new Date(),
+      transaction_date: paymentDateObj,
       created_by: req.user?.id,
       payment_method,
       bank_name: finalBankName,
       bank_id: bank_id || null,
       cheque_number: cheque_number || null,
       cheque_date: cheque_date ? new Date(cheque_date) : null,
-      cheque_cleared: payment_method === 'cheque' ? false : null,
+      // ✅ cheque payments are already cleared
+      cheque_cleared: isCheque ? true : null,
+      cheque_cleared_date: isCheque ? paymentDateObj : null,
       transaction: dbTransaction,
     });
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 3: Update bank balance for immediate payments (bank only)
-    // For cheque, don't update bank balance until cleared
-    // ═══════════════════════════════════════════════════════════════════════
-    let bankTransaction = null;
-    
-    if (selectedBank && payment_method === 'bank') {
-      const newBankBalance = parseFloat(selectedBank.balance) + paymentAmount;
-      await selectedBank.update(
-        { balance: newBankBalance.toFixed(2) },
-        { transaction: dbTransaction }
-      );
-
-      // Create bank transaction record (INCOMING)
-      bankTransaction = await BankTransaction.create({
-        bank_id: bank_id,
-        transaction_type: 'in',
-        amount: paymentAmount.toFixed(2),
-        description: `Payment received from ${customer.name}`,
-        reference_number: reference_number || null,
-        balance_after: newBankBalance.toFixed(2),
-        created_by: req.user?.id,
-        transaction_date: transaction_date ? new Date(transaction_date) : new Date()
-      }, { transaction: dbTransaction });
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 4: Update cheque record with customer_id and ledger_id
-    // ═══════════════════════════════════════════════════════════════════════
-    if (cheque_id && payment_method === 'cheque') {
+    // Link ledger entry back to the cheque
+    if (isCheque && chequeRecordId) {
       await Cheque.update(
-        {
-          customer_id: customerId,
-          customer_ledger_id: ledgerEntry.id,
-          payee_payer_name: customer.name,
-          description: description || `Payment received from customer: ${customer.name}`,
-          amount: paymentAmount,
-          cheque_number: cheque_number,
-          cheque_date: cheque_date ? new Date(cheque_date) : null,
-        },
-        { where: { id: cheque_id }, transaction: dbTransaction }
+        { customer_ledger_id: ledgerEntry.id },
+        { where: { id: chequeRecordId }, transaction: dbTransaction }
       );
     }
 
-    // if (payment_method === 'cash') {
-    //   await createCashbookEntry({
-    //     entry_date: transaction_date || new Date(),
-    //     entry_type: 'cash_in',
-    //     source_type: 'customer_payment',
-    //     reference_id: ledgerEntry.id,
-    //     reference_number: ledgerEntry.reference_number,
-    //     description: `Cash received from ${customer.name}`,
-    //     amount: paymentAmount,
-    //     created_by: req.user?.id,
-    //     transaction: dbTransaction,
-    //   });
-    //   // ✅ Sirf tab jab Simple Cashbook se aaya ho
-    //   if (from_simple_cashbook) {
-    //     await createSimpleCashbookEntry({
-    //       entry_date: transaction_date || new Date(),
-    //       entry_type: 'cash_in',
-    //       source_type: 'customer_payment',
-    //       reference_id: ledgerEntry.id,
-    //       reference_number: ledgerEntry.reference_number,
-    //       description: `${payment_method === 'cash' ? 'Cash' : payment_method === 'bank' ? 'Bank Transfer' : payment_method === 'cheque' ? 'Cheque' : 'Slip'} received from ${customer.name}${finalBankName ? ' | Bank: ' + finalBankName : ''}${cheque_number ? ' | Chq#: ' + cheque_number : ''}`,
-    //       amount: paymentAmount,
-    //       created_by: req.user?.id,
-    //       transaction: dbTransaction,
-    //     });
-    //   }
-    // }
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 5: Cashbook entries
+    // ═══════════════════════════════════════════════════════════════════════
+    if (payment_method === 'cash') {
+      await createCashbookEntry({
+        entry_date: transaction_date || new Date(),
+        entry_type: 'cash_in',
+        source_type: 'customer_payment',
+        reference_id: ledgerEntry.id,
+        reference_number: ledgerEntry.reference_number,
+        description: `وصل کیش ${customer.name}`,
+        amount: paymentAmount,
+        created_by: req.user?.id,
+        transaction: dbTransaction,
+      });
+    }
 
+    // Simple cashbook — ALL methods, only when from_simple_cashbook
+    if (from_simple_cashbook) {
+      const methodDescMap = {
+        cash: 'Cash',
+        bank: 'Bank Transfer',
+        cheque: 'Cheque',
+        slip: 'Slip',
+      };
+      const simpleLabel = methodDescMap[payment_method] || payment_method;
 
-    // ✅ Purana cash-only block hatao, ye naya lagao
-      if (payment_method === 'cash') {
-        await createCashbookEntry({
-          entry_date: transaction_date || new Date(),
-          entry_type: 'cash_in',
-          source_type: 'customer_payment',
-          reference_id: ledgerEntry.id,
-          reference_number: ledgerEntry.reference_number,
-          description: `وصل کیش ${customer.name}`,
-          amount: paymentAmount,
-          created_by: req.user?.id,
-          transaction: dbTransaction,
-        });
-      }
+      const descParts = [
+        `${simpleLabel} received from ${customer.name}`,
+        finalBankName ? `| Bank: ${finalBankName}` : null,
+        cheque_number ? `| Chq#: ${cheque_number}` : null,
+      ].filter(Boolean).join(' ');
 
-// ✅ Simple cashbook — ALL methods, sirf from_simple_cashbook check
-if (from_simple_cashbook) {
-  const methodDescMap = {
-    cash: 'Cash',
-    bank: 'Bank Transfer',
-    cheque: 'Cheque',
-    slip: 'Slip',
-  };
-  const methodLabel = methodDescMap[payment_method] || payment_method;
-
-  const descParts = [
-    `${methodLabel} received from ${customer.name}`,
-    finalBankName ? `| Bank: ${finalBankName}` : null,
-    cheque_number ? `| Chq#: ${cheque_number}` : null,
-  ].filter(Boolean).join(' ');
-
-  await createSimpleCashbookEntry({
-    entry_date: transaction_date || new Date(),
-    entry_type: 'cash_in',
-    source_type: 'customer_payment',
-    reference_id: ledgerEntry.id,
-    reference_number: ledgerEntry.reference_number || cheque_number || null,
-    description: descParts,
-    amount: paymentAmount,
-    created_by: req.user?.id,
-    transaction: dbTransaction,
-  });
-}
+      await createSimpleCashbookEntry({
+        entry_date: transaction_date || new Date(),
+        entry_type: 'cash_in',
+        source_type: 'customer_payment',
+        reference_id: ledgerEntry.id,
+        reference_number: ledgerEntry.reference_number || cheque_number || null,
+        description: descParts,
+        amount: paymentAmount,
+        created_by: req.user?.id,
+        transaction: dbTransaction,
+      });
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 5: Update customer balance (using the recalculated balance)
+    // STEP 6: Update customer balance (using the recalculated balance)
     // ═══════════════════════════════════════════════════════════════════════
     const finalBalance = await CustomerLedger.findOne({
       where: { customer_id: customerId },
@@ -265,19 +283,16 @@ if (from_simple_cashbook) {
 
     await dbTransaction.commit();
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // SUCCESS RESPONSE
-    // ═══════════════════════════════════════════════════════════════════════
     const responseData = {
       entry: ledgerEntry,
       ...(bankTransaction && { bankTransaction }),
-      ...(cheque_id && { cheque_id })
+      ...(chequeRecordId && { cheque_id: chequeRecordId })
     };
 
     return res.status(201).json({
       success: true,
-      message: payment_method === 'cheque' 
-        ? 'Cheque payment recorded. Bank balance will update when cheque clears.'
+      message: isCheque 
+        ? `Cheque #${cheque_number} recorded as cleared. ${finalBankName || 'Bank'} balance updated.`
         : 'Payment recorded successfully' + (bankTransaction ? ' and bank transaction created' : ''),
       data: responseData
     });
@@ -322,8 +337,9 @@ exports.deleteCustomerPayment = async (req, res) => {
     const paymentAmount = parseFloat(entry.debit);
     
     // Check if this payment is linked to a sale (reference_id points to sale)
+    // (cheque payments made here point reference_id at the cheque, so skip them)
     let sale = null;
-    if (entry.reference_id && entry.transaction_type === 'payment') {
+    if (entry.reference_id && entry.transaction_type === 'payment' && !entry.cheque_number) {
       sale = await Sale.findByPk(entry.reference_id, { transaction: dbTransaction });
     }
 
@@ -332,12 +348,20 @@ exports.deleteCustomerPayment = async (req, res) => {
       const bank = await Bank.findByPk(entry.bank_id, { transaction: dbTransaction });
       if (bank) {
         const newBankBalance = parseFloat(bank.balance) - paymentAmount;
+
+        if (newBankBalance < 0) {
+          await dbTransaction.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Cannot delete this payment: reversing Rs ${paymentAmount.toFixed(2)} from "${bank.name}" would take its balance negative (current: Rs ${parseFloat(bank.balance).toFixed(2)}).`
+          });
+        }
+
         await bank.update(
           { balance: newBankBalance.toFixed(2) },
           { transaction: dbTransaction }
         );
         
-        // Delete the associated bank transaction
         await BankTransaction.destroy({
           where: {
             bank_id: entry.bank_id,
@@ -350,8 +374,36 @@ exports.deleteCustomerPayment = async (req, res) => {
       }
     }
 
-    // STEP 2: Delete cheque record if cheque payment
+    // STEP 2: Cheque payment — cheques are recorded as cleared, so reverse the
+    //         bank credit and remove its bank transaction, then delete the cheque.
     if (entry.cheque_number && entry.reference_id) {
+      const cheque = await Cheque.findByPk(entry.reference_id, { transaction: dbTransaction });
+
+      if (cheque && cheque.status === 'cleared' && cheque.bank_transaction_id) {
+        const bank = await Bank.findByPk(cheque.bank_id, { transaction: dbTransaction });
+        if (bank) {
+          const restoredBalance = parseFloat(bank.balance) - parseFloat(cheque.amount);
+
+          if (restoredBalance < 0) {
+            await dbTransaction.rollback();
+            return res.status(400).json({
+              success: false,
+              message: `Cannot delete this payment: reversing Rs ${parseFloat(cheque.amount).toFixed(2)} from "${bank.name}" would take its balance negative (current: Rs ${parseFloat(bank.balance).toFixed(2)}).`
+            });
+          }
+
+          await bank.update(
+            { balance: restoredBalance.toFixed(2) },
+            { transaction: dbTransaction }
+          );
+        }
+
+        await BankTransaction.destroy({
+          where: { id: cheque.bank_transaction_id },
+          transaction: dbTransaction
+        });
+      }
+
       await Cheque.destroy({
         where: { id: entry.reference_id },
         transaction: dbTransaction
@@ -378,14 +430,13 @@ exports.deleteCustomerPayment = async (req, res) => {
     }
 
     // STEP 4: Update sale if this payment is linked to a sale
+    let newAmountPaid = null;
+    let newPaymentStatus = null;
     if (sale) {
-      // Calculate new amount paid for the sale
       const currentAmountPaid = parseFloat(sale.amount_paid) || 0;
-      const newAmountPaid = Math.max(currentAmountPaid - paymentAmount, 0);
+      newAmountPaid = Math.max(currentAmountPaid - paymentAmount, 0);
       const grandTotal = parseFloat(sale.grand_total) || 0;
       
-      // Determine new payment status
-      let newPaymentStatus = sale.payment_status;
       if (newAmountPaid >= grandTotal) {
         newPaymentStatus = 'paid';
       } else if (newAmountPaid > 0) {
@@ -394,7 +445,6 @@ exports.deleteCustomerPayment = async (req, res) => {
         newPaymentStatus = 'unpaid';
       }
       
-      // Update the sale
       await sale.update({
         amount_paid: newAmountPaid,
         payment_status: newPaymentStatus,
@@ -438,8 +488,8 @@ exports.deleteCustomerPayment = async (req, res) => {
       data: sale ? {
         sale_id: sale.id,
         invoice_number: sale.invoice_number,
-        new_amount_paid: parseFloat(sale.amount_paid) - paymentAmount,
-        new_payment_status: sale.payment_status
+        new_amount_paid: newAmountPaid,
+        new_payment_status: newPaymentStatus
       } : null
     });
 
@@ -521,7 +571,8 @@ exports.getCustomerPayments = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ✅ UPDATE CHEQUE CLEARED STATUS (when cheque is cashed)
+// ✅ UPDATE CHEQUE CLEARED STATUS
+//    (kept for manual un-clear / re-clear of an existing cheque entry)
 // ═══════════════════════════════════════════════════════════════════════════
 exports.updateChequeClearedStatus = async (req, res) => {
   const t = await sequelize.transaction();
@@ -546,6 +597,7 @@ exports.updateChequeClearedStatus = async (req, res) => {
     
     // If clearing a cheque (false → true), update bank balance
     if (cheque_cleared === true && wasCleared === false) {
+      let clearedTxn = null;
       if (ledgerEntry.bank_id) {
         const bank = await Bank.findByPk(ledgerEntry.bank_id, { transaction: t });
         if (bank) {
@@ -555,8 +607,7 @@ exports.updateChequeClearedStatus = async (req, res) => {
             { transaction: t }
           );
 
-          // Create bank transaction record for cleared cheque
-          await BankTransaction.create({
+          clearedTxn = await BankTransaction.create({
             bank_id: ledgerEntry.bank_id,
             transaction_type: 'in',
             amount: paymentAmount.toFixed(2),
@@ -569,12 +620,12 @@ exports.updateChequeClearedStatus = async (req, res) => {
         }
       }
       
-      // Update cheque record if exists
       if (ledgerEntry.reference_id) {
         await Cheque.update(
           {
             status: 'cleared',
-            cleared_date: cheque_cleared_date || new Date()
+            cleared_date: cheque_cleared_date || new Date(),
+            bank_transaction_id: clearedTxn?.id || null
           },
           { where: { id: ledgerEntry.reference_id }, transaction: t }
         );
@@ -587,12 +638,20 @@ exports.updateChequeClearedStatus = async (req, res) => {
         const bank = await Bank.findByPk(ledgerEntry.bank_id, { transaction: t });
         if (bank) {
           const newBankBalance = parseFloat(bank.balance) - paymentAmount;
+
+          if (newBankBalance < 0) {
+            await t.rollback();
+            return res.status(400).json({
+              success: false,
+              message: `Cannot un-clear: would take "${bank.name}" balance negative (current: Rs ${parseFloat(bank.balance).toFixed(2)}).`
+            });
+          }
+
           await bank.update(
             { balance: newBankBalance.toFixed(2) },
             { transaction: t }
           );
 
-          // Create reversal bank transaction
           await BankTransaction.create({
             bank_id: ledgerEntry.bank_id,
             transaction_type: 'out',
@@ -606,28 +665,25 @@ exports.updateChequeClearedStatus = async (req, res) => {
         }
       }
       
-      // Update cheque record if exists
       if (ledgerEntry.reference_id) {
         await Cheque.update(
           {
             status: 'pending',
-            cleared_date: null
+            cleared_date: null,
+            bank_transaction_id: null
           },
           { where: { id: ledgerEntry.reference_id }, transaction: t }
         );
       }
     }
 
-    // Update cheque cleared status in ledger
     await ledgerEntry.update({
       cheque_cleared: cheque_cleared,
       cheque_cleared_date: cheque_cleared ? (cheque_cleared_date || new Date()) : null,
     }, { transaction: t });
 
-    // Recalculate all balances (important after status change)
     await recalculateBalances(ledgerEntry.customer_id, t);
 
-    // Update customer balance
     const finalBalance = await CustomerLedger.findOne({
       where: { customer_id: ledgerEntry.customer_id },
       order: [['date', 'DESC'], ['id', 'DESC']],
