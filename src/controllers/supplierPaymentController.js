@@ -6,6 +6,8 @@ const { createCashbookEntry } = require('./cashbookController');
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ✅ CREATE SUPPLIER PAYMENT + AUTO BANK TRANSACTION
+//    Cheque payments are recorded as CLEARED immediately (bank balance is
+//    debited right away, cheque status = cleared).
 // ═══════════════════════════════════════════════════════════════════════════
 exports.createSupplierPayment = async (req, res) => {
   const dbTransaction = await sequelize.transaction();
@@ -18,7 +20,7 @@ exports.createSupplierPayment = async (req, res) => {
       bank_id,
       bank_name,
       cheque_number,
-      cheque_id,  // Add this - cheque_id from frontend
+      cheque_id,
       cheque_date,
       reference_number,
       description,
@@ -53,10 +55,29 @@ exports.createSupplierPayment = async (req, res) => {
     }
 
     const paymentAmount = parseFloat(amount);
+    const paymentDateObj = transaction_date ? new Date(transaction_date) : new Date();
+    const paymentDateStr = paymentDateObj.toISOString().split('T')[0];
 
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 1: Validate bank if bank/cheque payment
     // ═══════════════════════════════════════════════════════════════════════
+    if (payment_method === 'cheque') {
+      if (!cheque_number) {
+        await dbTransaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Cheque number is required for cheque payment'
+        });
+      }
+      if (!bank_id) {
+        await dbTransaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Bank is required for cheque payment'
+        });
+      }
+    }
+
     let selectedBank = null;
     if ((payment_method === 'bank' || payment_method === 'cheque') && bank_id) {
       selectedBank = await Bank.findByPk(bank_id, { transaction: dbTransaction });
@@ -69,24 +90,82 @@ exports.createSupplierPayment = async (req, res) => {
         });
       }
 
-      // For bank payments, check balance immediately
-      // For cheque payments, don't check balance yet (only when cleared)
-      if (payment_method === 'bank') {
-        const bankBalance = parseFloat(selectedBank.balance);
-        if (bankBalance < paymentAmount) {
-          await dbTransaction.rollback();
-          return res.status(400).json({
-            success: false,
-            message: `Insufficient balance in ${selectedBank.name}. Available: Rs ${bankBalance.toFixed(2)}`
-          });
-        }
+      // ✅ Both bank AND cheque debit the bank immediately (cheque is cleared)
+      const bankBalance = parseFloat(selectedBank.balance);
+      if (bankBalance < paymentAmount) {
+        await dbTransaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient balance in ${selectedBank.name}. Available: Rs ${bankBalance.toFixed(2)}`
+        });
       }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 2: Create supplier ledger entry (payment)
+    // STEP 2: Record bank transaction (bank / cheque)
     // ═══════════════════════════════════════════════════════════════════════
-    
+    let bankTransaction = null;
+    if (selectedBank && (payment_method === 'bank' || payment_method === 'cheque')) {
+      const newBankBalance = parseFloat(selectedBank.balance) - paymentAmount;
+      await selectedBank.update(
+        { balance: newBankBalance.toFixed(2) },
+        { transaction: dbTransaction }
+      );
+
+      bankTransaction = await BankTransaction.create({
+        bank_id: bank_id,
+        transaction_type: 'out',
+        amount: paymentAmount.toFixed(2),
+        description: payment_method === 'cheque'
+          ? `Cheque cleared - #${cheque_number} to ${supplier.name}`
+          : `Bank transfer to ${supplier.name}`,
+        reference_number: payment_method === 'cheque'
+          ? cheque_number
+          : (reference_number || null),
+        balance_after: newBankBalance.toFixed(2),
+        created_by: req.user?.id,
+        transaction_date: paymentDateObj
+      }, { transaction: dbTransaction });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 3: Cheque record — update existing (from frontend) or create it.
+    //         Always stored as CLEARED.
+    // ═══════════════════════════════════════════════════════════════════════
+    let chequeRecordId = cheque_id || null;
+    if (payment_method === 'cheque') {
+      const chequeFields = {
+        status: 'cleared',
+        cleared_date: paymentDateStr,
+        bank_transaction_id: bankTransaction?.id || null,
+        supplier_id: supplierId,
+        payee_payer_name: supplier.name,
+        description: description || `Payment to supplier: ${supplier.name}`,
+      };
+
+      if (chequeRecordId) {
+        await Cheque.update(
+          chequeFields,
+          { where: { id: chequeRecordId }, transaction: dbTransaction }
+        );
+      } else {
+        const newCheque = await Cheque.create({
+          bank_id: bank_id,
+          cheque_number: cheque_number,
+          cheque_type: 'issued',
+          amount: paymentAmount.toFixed(2),
+          issue_date: paymentDateObj,
+          due_date: cheque_date ? new Date(cheque_date) : null,
+          created_by: req.user?.id,
+          ...chequeFields,
+        }, { transaction: dbTransaction });
+        chequeRecordId = newCheque.id;
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 4: Create supplier ledger entry (payment)
+    // ═══════════════════════════════════════════════════════════════════════
     const methodLabels = {
       'cash': 'Cash Payment',
       'bank': 'Bank Transfer',
@@ -96,7 +175,6 @@ exports.createSupplierPayment = async (req, res) => {
 
     const methodLabel = methodLabels[payment_method] || payment_method;
     
-    // Auto-generate description if not provided
     const autoDesc = [
       `${methodLabel} to ${supplier.name}`,
       bank_name ? `| Bank: ${bank_name}` : null,
@@ -106,74 +184,43 @@ exports.createSupplierPayment = async (req, res) => {
 
     const finalDescription = description?.trim() || autoDesc;
 
-    // Create ledger entry with temporary balance
+    const isCheque = payment_method === 'cheque';
+
     const ledgerEntry = await SupplierLedger.create({
       supplier_id: supplierId,
       reference_type: 'payment',
-      reference_id: cheque_id || null,  // Link to cheque if exists
+      reference_id: chequeRecordId || null,  // Link to cheque if exists
       reference_number: reference_number || cheque_number || null,
       debit: paymentAmount.toFixed(2),
       credit: '0.00',
       balance: '0.00', // temporary - will be recalculated
       description: finalDescription,
-      transaction_date: transaction_date ? new Date(transaction_date) : new Date(),
+      transaction_date: paymentDateObj,
       payment_method,
-      bank_name: bank_name || null,
-      bank_id: bank_id || null,  // Add bank_id
+      bank_name: bank_name || selectedBank?.name || null,
+      bank_id: bank_id || null,
       cheque_number: cheque_number || null,
       cheque_date: cheque_date 
-      ? new Date(cheque_date + 'T00:00:00.000Z') 
-      : null,
-      cheque_cleared: false,  // Add this flag
-      cheque_cleared_date: null,  // Add this
+        ? new Date(cheque_date + 'T00:00:00.000Z') 
+        : null,
+      // ✅ cheque payments are already cleared
+      cheque_cleared: isCheque,
+      cheque_cleared_date: isCheque ? paymentDateObj : null,
       created_by: req.user?.id,
     }, { transaction: dbTransaction });
 
-
-     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 3: Update cheque record with supplier_id and ledger_id
-    // ═══════════════════════════════════════════════════════════════════════
-    if (cheque_id && payment_method === 'cheque') {
+    // Link ledger entry back to the cheque
+    if (isCheque && chequeRecordId) {
       await Cheque.update(
-        {
-          supplier_id: supplierId,
-          supplier_ledger_id: ledgerEntry.id,
-          payee_payer_name: supplier.name,
-          description: description || `Payment to supplier: ${supplier.name}`
-        },
-        { where: { id: cheque_id }, transaction: dbTransaction }
+        { supplier_ledger_id: ledgerEntry.id },
+        { where: { id: chequeRecordId }, transaction: dbTransaction }
       );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 4: Recalculate supplier ledger balances
+    // STEP 5: Recalculate supplier ledger balances
     // ═══════════════════════════════════════════════════════════════════════
     await recalculateBalances(supplierId, dbTransaction);
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 5: Record bank transaction (if bank/cheque payment)
-    // ═══════════════════════════════════════════════════════════════════════
-     let bankTransaction = null;
-    if (selectedBank && payment_method === 'bank') {
-      // Update bank balance immediately for bank transfers
-      const newBankBalance = parseFloat(selectedBank.balance) - paymentAmount;
-      await selectedBank.update(
-        { balance: newBankBalance.toFixed(2) },
-        { transaction: dbTransaction }
-      );
-
-      // Create bank transaction record
-      bankTransaction = await BankTransaction.create({
-        bank_id: bank_id,
-        transaction_type: 'out',
-        amount: paymentAmount.toFixed(2),
-        description: `Bank transfer to ${supplier.name}`,
-        reference_number: reference_number || null,
-        balance_after: newBankBalance.toFixed(2),
-        created_by: req.user?.id,
-        transaction_date: transaction_date ? new Date(transaction_date) : new Date()
-      }, { transaction: dbTransaction });
-    }
 
     if (payment_method === 'cash') {
       await createCashbookEntry({
@@ -195,19 +242,16 @@ exports.createSupplierPayment = async (req, res) => {
     await ledgerEntry.reload({ transaction: dbTransaction });
     await dbTransaction.commit();
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // SUCCESS RESPONSE
-    // ═══════════════════════════════════════════════════════════════════════
-const responseData = {
+    const responseData = {
       entry: ledgerEntry,
       ...(bankTransaction && { bankTransaction }),
-      ...(cheque_id && { cheque_id })
+      ...(chequeRecordId && { cheque_id: chequeRecordId })
     };
 
     return res.status(201).json({
       success: true,
       message: payment_method === 'cheque' 
-        ? 'Cheque payment recorded. Bank balance will update when cheque clears.'
+        ? `Cheque #${cheque_number} recorded as cleared. ${selectedBank?.name || 'Bank'} balance updated.`
         : 'Payment recorded successfully' + (bankTransaction ? ' and bank transaction created' : ''),
       data: responseData
     });
@@ -329,18 +373,15 @@ exports.deleteSupplierPayment = async (req, res) => {
     // STEP 1: Reverse bank transaction if bank payment (delete the original)
     // ═══════════════════════════════════════════════════════════════════════
     if (entry.payment_method === 'bank' && entry.bank_id) {
-      // Find bank by ID
       const bank = await Bank.findByPk(entry.bank_id, { transaction: dbTransaction });
 
       if (bank) {
-        // Reverse bank balance (add back the money)
         const newBankBalance = parseFloat(bank.balance) + paymentAmount;
         await bank.update(
           { balance: newBankBalance.toFixed(2) },
           { transaction: dbTransaction }
         );
 
-        // Delete the associated bank transaction
         await BankTransaction.destroy({
           where: {
             bank_id: entry.bank_id,
@@ -354,10 +395,29 @@ exports.deleteSupplierPayment = async (req, res) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 2: Delete cheque record if cheque payment
+    // STEP 2: Cheque payment — since cheques are recorded as cleared, give
+    //         the money back to the bank and remove its bank transaction,
+    //         then delete the cheque record.
     // ═══════════════════════════════════════════════════════════════════════
     if (entry.cheque_number && entry.reference_id) {
-      // Delete the cheque record
+      const cheque = await Cheque.findByPk(entry.reference_id, { transaction: dbTransaction });
+
+      if (cheque && cheque.status === 'cleared' && cheque.bank_transaction_id) {
+        const bank = await Bank.findByPk(cheque.bank_id, { transaction: dbTransaction });
+        if (bank) {
+          const restoredBalance = parseFloat(bank.balance) + parseFloat(cheque.amount);
+          await bank.update(
+            { balance: restoredBalance.toFixed(2) },
+            { transaction: dbTransaction }
+          );
+        }
+
+        await BankTransaction.destroy({
+          where: { id: cheque.bank_transaction_id },
+          transaction: dbTransaction
+        });
+      }
+
       await Cheque.destroy({
         where: { id: entry.reference_id },
         transaction: dbTransaction
@@ -369,7 +429,6 @@ exports.deleteSupplierPayment = async (req, res) => {
     // ═══════════════════════════════════════════════════════════════════════
     const { SimpleCashbook } = require('../models');
     
-    // Delete from SimpleCashbook
     const simpleCashbookEntry = await SimpleCashbook.findOne({
       where: {
         source_type: 'supplier_payment',
@@ -388,7 +447,6 @@ exports.deleteSupplierPayment = async (req, res) => {
       });
     }
 
-    // Delete from regular Cashbook if exists
     const { Cashbook } = require('../models');
     const cashbookEntry = await Cashbook.findOne({
       where: {
@@ -409,22 +467,12 @@ exports.deleteSupplierPayment = async (req, res) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 4: Check if this payment is linked to a purchase receipt
-    // ═══════════════════════════════════════════════════════════════════════
-    // If the payment is linked to a purchase receipt, we need to handle that
-    const { PurchaseReceipt, PurchaseReceiptItem, PurchaseOrder } = require('../models');
-    
-    // Find if this payment is linked to any purchase receipt
-    // (You may need to add a payment_id field to purchase_receipts table)
-    // For now, we'll check if there's a receipt with this reference number
-    
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 5: Delete the original payment entry
+    // STEP 4: Delete the original payment entry
     // ═══════════════════════════════════════════════════════════════════════
     await entry.destroy({ transaction: dbTransaction });
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 6: Recalculate all remaining ledger balances
+    // STEP 5: Recalculate all remaining ledger balances
     // ═══════════════════════════════════════════════════════════════════════
     const remainingEntries = await SupplierLedger.findAll({
       where: { supplier_id: supplierId },
@@ -439,7 +487,7 @@ exports.deleteSupplierPayment = async (req, res) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 7: Update supplier balance
+    // STEP 6: Update supplier balance
     // ═══════════════════════════════════════════════════════════════════════
     await Supplier.update(
       { balance: runningBalance.toFixed(2) },

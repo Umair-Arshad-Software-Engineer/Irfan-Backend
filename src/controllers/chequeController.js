@@ -221,6 +221,8 @@ exports.updateCheque = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ✅ CLEAR CHEQUE  →  adjusts bank balance + creates BankTransaction
+//    (used only for standalone pending cheques created via createCheque —
+//     cheques recorded through sale / supplier payments are already cleared)
 // ═══════════════════════════════════════════════════════════════════════════
 exports.clearCheque = async (req, res) => {
   const t = await Cheque.sequelize.transaction();
@@ -302,25 +304,24 @@ exports.clearCheque = async (req, res) => {
       }
     }
 
-    // ✅ ADD THIS BLOCK — mirrors the supplier logic above
-if (cheque.customer_id && cheque.cheque_type === 'received') {
-  const paymentEntry = await CustomerLedger.findOne({
-    where: {
-      customer_id: cheque.customer_id,
-      cheque_number: cheque.cheque_number,
-      transaction_type: 'payment'
-    },
-    transaction: t
-  });
+    if (cheque.customer_id && cheque.cheque_type === 'received') {
+      const paymentEntry = await CustomerLedger.findOne({
+        where: {
+          customer_id: cheque.customer_id,
+          cheque_number: cheque.cheque_number,
+          transaction_type: 'payment'
+        },
+        transaction: t
+      });
 
-  if (paymentEntry) {
-    await paymentEntry.update({
-      cheque_cleared: true,
-      cheque_cleared_date: cleared_date ? new Date(cleared_date) : new Date()
-    }, { transaction: t });
-    updatedLedgerEntry = paymentEntry;
-  }
-}
+      if (paymentEntry) {
+        await paymentEntry.update({
+          cheque_cleared: true,
+          cheque_cleared_date: cleared_date ? new Date(cleared_date) : new Date()
+        }, { transaction: t });
+        updatedLedgerEntry = paymentEntry;
+      }
+    }
 
     await cheque.update({
       status: 'cleared',
@@ -479,7 +480,10 @@ exports.cancelCheque = async (req, res) => {
   const t = await Cheque.sequelize.transaction();
   try {
     const cheque = await Cheque.findByPk(req.params.id, { transaction: t });
-    if (!cheque) return res.status(404).json({ success: false, message: 'Cheque not found' });
+    if (!cheque) {
+      await t.rollback();
+      return res.status(404).json({ success: false, message: 'Cheque not found' });
+    }
 
     if (!['pending'].includes(cheque.status)) {
       await t.rollback();
@@ -546,7 +550,6 @@ exports.deleteCheque = async (req, res) => {
           
           await bank.update({ balance: reversedBalance.toFixed(2) }, { transaction: t });
           
-          // Create reversal transaction with better tracking
           reversalTransaction = await BankTransaction.create({
             bank_id: cheque.bank_id,
             transaction_type: cheque.cheque_type === 'issued' ? 'in' : 'out',
@@ -556,13 +559,12 @@ exports.deleteCheque = async (req, res) => {
             balance_after: reversedBalance.toFixed(2),
             created_by: req.user?.id,
             transaction_date: new Date(),
-            reversal_of_transaction_id: bankTxn.id  // Add this field to your model
+            reversal_of_transaction_id: bankTxn.id
           }, { transaction: t });
           
-          // Mark the original transaction as reversed (add this field to your model)
           await bankTxn.update({ 
             reversed_by_transaction_id: reversalTransaction.id,
-            is_reversed: true  // Add this field to your model
+            is_reversed: true
           }, { transaction: t });
         }
       }
@@ -671,6 +673,8 @@ exports.deleteCheque = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ✅ REVERT TO PENDING  →  reverses cleared status and bank effects
+//    (cheques recorded via sale / supplier payments start as cleared, so this
+//     is the way to take one back to pending before editing / deleting it)
 // ═══════════════════════════════════════════════════════════════════════════
 exports.revertToPending = async (req, res) => {
   const t = await Cheque.sequelize.transaction();
@@ -709,14 +713,20 @@ exports.revertToPending = async (req, res) => {
           const currentBalance = parseFloat(bank.balance);
           const chequeAmount = parseFloat(cheque.amount);
           
-          // Reverse the original transaction
           const reversedBalance = cheque.cheque_type === 'issued'
             ? currentBalance + chequeAmount  // Add back the debit
             : currentBalance - chequeAmount;  // Reverse the credit
+
+          if (reversedBalance < 0) {
+            await t.rollback();
+            return res.status(400).json({
+              success: false,
+              message: `Cannot revert: reversing this cheque would take "${bank.name}" balance negative (current: Rs ${currentBalance.toFixed(2)}, cheque: Rs ${chequeAmount.toFixed(2)}).`
+            });
+          }
           
           await bank.update({ balance: reversedBalance.toFixed(2) }, { transaction: t });
           
-          // Create reversal transaction
           reversalTransaction = await BankTransaction.create({
             bank_id: cheque.bank_id,
             transaction_type: cheque.cheque_type === 'issued' ? 'in' : 'out',
@@ -729,10 +739,44 @@ exports.revertToPending = async (req, res) => {
             reversal_of_transaction_id: bankTxn.id
           }, { transaction: t });
           
-          // Mark original as reversed
           await bankTxn.update({ 
             reversed_by_transaction_id: reversalTransaction.id,
             is_reversed: true
+          }, { transaction: t });
+        }
+      }
+
+      // ✅ Un-clear the ledger payment entries too, so they match the pending cheque
+      if (cheque.supplier_id && cheque.cheque_type === 'issued') {
+        const supplierEntry = await SupplierLedger.findOne({
+          where: {
+            supplier_id: cheque.supplier_id,
+            cheque_number: cheque.cheque_number,
+            reference_type: 'payment'
+          },
+          transaction: t
+        });
+        if (supplierEntry) {
+          await supplierEntry.update({
+            cheque_cleared: false,
+            cheque_cleared_date: null
+          }, { transaction: t });
+        }
+      }
+
+      if (cheque.customer_id && cheque.cheque_type === 'received') {
+        const customerEntry = await CustomerLedger.findOne({
+          where: {
+            customer_id: cheque.customer_id,
+            cheque_number: cheque.cheque_number,
+            transaction_type: 'payment'
+          },
+          transaction: t
+        });
+        if (customerEntry) {
+          await customerEntry.update({
+            cheque_cleared: false,
+            cheque_cleared_date: null
           }, { transaction: t });
         }
       }
@@ -799,6 +843,9 @@ exports.revertToPending = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ✅ HELPER FUNCTION: Recalculate Customer Balance
+//    ✅ FIX: sign convention now matches salesController
+//    (balance = credit - debit; sale = credit, payment = debit).
+//    It was debit - credit before, which flipped the customer's balance.
 // ═══════════════════════════════════════════════════════════════════════════
 async function recalculateCustomerBalance(customerId, transaction) {
   try {
@@ -811,7 +858,7 @@ async function recalculateCustomerBalance(customerId, transaction) {
     let runningBalance = 0;
     
     for (const entry of entries) {
-      runningBalance = runningBalance + (parseFloat(entry.debit) || 0) - (parseFloat(entry.credit) || 0);
+      runningBalance = runningBalance + (parseFloat(entry.credit) || 0) - (parseFloat(entry.debit) || 0);
       await entry.update({ balance: runningBalance }, { transaction });
     }
     
