@@ -173,7 +173,7 @@ async function seedAdminUser() {
     await sequelize.authenticate();
     console.log('✅ Database connected');
 
-    await sequelize.sync({ alter: true });
+    await sequelize.sync();
     console.log('✅ Database & tables synced');
 
     await seedAdminUser();
@@ -184,9 +184,6 @@ async function seedAdminUser() {
     });
   } catch (err) {
     console.error('❌ Database error:', err);
-    console.log('Press any key to exit...');
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on('data', process.exit.bind(process, 1));
+    process.exit(1);
   }
 })();
