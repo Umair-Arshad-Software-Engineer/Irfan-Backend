@@ -37,6 +37,18 @@ module.exports = (sequelize) => {
       allowNull: false,
       defaultValue: 0
     },
+    // ✅ Manual pieces
+    pcs: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0
+    },
+    // ✅ NEW: manual weight (used to compute line_total)
+    weight: {
+      type: DataTypes.DECIMAL(15, 3),
+      allowNull: false,
+      defaultValue: 0.000
+    },
     unit_cost: {
       type: DataTypes.DECIMAL(15, 2),
       allowNull: false,
@@ -46,12 +58,11 @@ module.exports = (sequelize) => {
       type: DataTypes.DECIMAL(15, 2),
       defaultValue: 0.00
     },
-    // Length-wise selection (JSON array of {length, quantity})
+    // Kept for backward compatibility (no longer populated)
     selected_lengths: {
       type: DataTypes.JSON,
       allowNull: true
     },
-    // Total pieces from all lengths
     total_pieces: {
       type: DataTypes.INTEGER,
       defaultValue: 0

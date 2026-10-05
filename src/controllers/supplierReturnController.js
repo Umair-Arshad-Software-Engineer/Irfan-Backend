@@ -77,35 +77,30 @@ exports.createSupplierReturn = async (req, res) => {
     // Generate return number
     const return_number = await generateReturnNumber();
 
-    // Calculate totals
+    // ── Calculate totals — line_total = unit_cost × weight ─────────────
     let subtotal = 0;
     const returnItems = [];
 
     for (const item of items) {
       const qty = item.quantity || 0;
-      const cost = item.unit_cost || 0;
-      
-      // Calculate line total - if lengths are selected, use total pieces
-      let lineTotal = 0;
-      let totalPieces = 0;
-      
-      if (item.selected_lengths && item.selected_lengths.length > 0) {
-        totalPieces = item.selected_lengths.reduce((sum, l) => sum + (l.quantity || 0), 0);
-        lineTotal = totalPieces * cost;
-      } else {
-        totalPieces = qty;
-        lineTotal = qty * cost;
-      }
+      const pcs = item.pcs || 0;
+      const weight = parseFloat(item.weight) || 0;
+      const cost = parseFloat(item.unit_cost) || 0;
+
+      // ✅ FORMULA: price × weight
+      const lineTotal = cost * weight;
 
       subtotal += lineTotal;
 
       returnItems.push({
         product_id: item.product_id,
         quantity: qty,
+        pcs: pcs,
+        weight: weight,
         unit_cost: cost,
         line_total: parseFloat(lineTotal.toFixed(2)),
-        selected_lengths: item.selected_lengths || null,
-        total_pieces: totalPieces,
+        selected_lengths: null,
+        total_pieces: pcs > 0 ? pcs : qty,
         notes: item.notes || null
       });
     }
@@ -138,18 +133,19 @@ exports.createSupplierReturn = async (req, res) => {
       }, { transaction });
     }
 
-    // ── Update product stock (REDUCE) ──────────────────────────────────────
+    // ── Update product stock (REDUCE by pcs) ───────────────────────────
     for (const item of returnItems) {
       const product = await Product.findByPk(item.product_id, { transaction });
       if (product) {
+        const deductQty = item.pcs > 0 ? item.pcs : item.quantity;
         await product.update({
-          physical_qty: Math.max(0, product.physical_qty - item.total_pieces),
-          available_qty: Math.max(0, product.available_qty - item.total_pieces)
+          physical_qty: Math.max(0, product.physical_qty - deductQty),
+          available_qty: Math.max(0, product.available_qty - deductQty)
         }, { transaction });
       }
     }
 
-    // ── Create ledger entry (DEBIT - we owe less to supplier) ──────────────
+    // ── Create ledger entry (DEBIT — we owe less to supplier) ──────────
     await createLedgerEntry({
       supplier_id,
       reference_type: 'supplier_return',
@@ -220,7 +216,7 @@ exports.getAllSupplierReturns = async (req, res) => {
     const whereClause = {};
 
     if (supplier_id) whereClause.supplier_id = supplier_id;
-    
+
     if (from_date || to_date) {
       whereClause.return_date = {};
       if (from_date) whereClause.return_date[Op.gte] = new Date(from_date);
@@ -342,18 +338,19 @@ exports.deleteSupplierReturn = async (req, res) => {
       });
     }
 
-    // ── Reverse stock updates (ADD BACK) ───────────────────────────────────
+    // ── Reverse stock updates (ADD BACK by pcs) ────────────────────────
     for (const item of supplierReturn.items) {
       const product = await Product.findByPk(item.product_id, { transaction });
       if (product) {
+        const addBackQty = item.pcs > 0 ? item.pcs : item.quantity;
         await product.update({
-          physical_qty: product.physical_qty + item.total_pieces,
-          available_qty: product.available_qty + item.total_pieces
+          physical_qty: product.physical_qty + addBackQty,
+          available_qty: product.available_qty + addBackQty
         }, { transaction });
       }
     }
 
-    // ── Delete ledger entry ────────────────────────────────────────────────
+    // ── Delete ledger entry ────────────────────────────────────────────
     const ledgerEntry = await SupplierLedger.findOne({
       where: {
         reference_type: 'supplier_return',
@@ -379,7 +376,7 @@ exports.deleteSupplierReturn = async (req, res) => {
       }
     }
 
-    // ── Delete return items and return ─────────────────────────────────────
+    // ── Delete return items and return ─────────────────────────────────
     await SupplierReturnItem.destroy({
       where: { supplier_return_id: id },
       transaction
