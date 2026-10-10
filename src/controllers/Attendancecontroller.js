@@ -2,6 +2,14 @@
 const { Op } = require('sequelize');
 const { Attendance, Employee } = require('../models');
 
+// ── Helper: overtime only counts on Present / Half_Day, clamped 0–24 ─────────
+function normaliseOvertime(status, value) {
+  if (status !== 'Present' && status !== 'Half_Day') return 0;
+  const h = parseFloat(value);
+  if (isNaN(h) || h < 0) return 0;
+  return Math.min(h, 24);
+}
+
 // ── GET attendance for an employee (optional month filter) ────────────────────
 exports.getAttendanceByEmployee = async (req, res) => {
   try {
@@ -54,7 +62,7 @@ exports.getAttendanceByDate = async (req, res) => {
 // ── MARK / UPDATE attendance for one employee on one date ─────────────────────
 exports.markAttendance = async (req, res) => {
   try {
-    const { employee_id, date, status, notes } = req.body;
+    const { employee_id, date, status, notes, overtime_hours } = req.body;
 
     if (!employee_id || !date || !status) {
       return res.status(400).json({ success: false, message: 'employee_id, date and status are required' });
@@ -67,7 +75,13 @@ exports.markAttendance = async (req, res) => {
 
     // upsert — create or update
     const [record, created] = await Attendance.upsert(
-      { employee_id, date, status, notes },
+      {
+        employee_id,
+        date,
+        status,
+        notes,
+        overtime_hours: normaliseOvertime(status, overtime_hours),
+      },
       { returning: true }
     );
 
@@ -86,7 +100,7 @@ exports.markAttendance = async (req, res) => {
 exports.bulkMarkAttendance = async (req, res) => {
   try {
     const { date, records } = req.body;
-    // records: [{ employee_id, status, notes? }, ...]
+    // records: [{ employee_id, status, notes?, overtime_hours? }, ...]
 
     if (!date || !Array.isArray(records) || records.length === 0) {
       return res.status(400).json({ success: false, message: 'date and records[] are required' });
@@ -99,6 +113,7 @@ exports.bulkMarkAttendance = async (req, res) => {
         date,
         status: rec.status,
         notes: rec.notes ?? null,
+        overtime_hours: normaliseOvertime(rec.status, rec.overtime_hours),
       }, { returning: true });
       results.push(saved);
     }

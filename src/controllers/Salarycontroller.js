@@ -3,6 +3,8 @@ const { Op } = require('sequelize');
 const sequelize = require('../config/db');
 const { Employee, Attendance, SalaryPayment, AdvancePayment, EmployeeExpense, ContractWorkEntry } = require('../models');
 
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
 // ── Helper: calendar days (inclusives) ────────────────────────────────────────
 function countCalendarDays(from, to) {
   const diff = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
@@ -20,6 +22,24 @@ function summarise(records, totalDays) {
   }
   absent += totalDays - records.length;   // unmarked days = absent
   return { present, absent, halfDays, leave };
+}
+
+// ── Helper: overtime (hours, hourly rate, amount) ─────────────────────────────
+// Rate = employee.overtime_rate if set (> 0), otherwise
+//        (per-day salary / standard working hours).
+// Monthly per-day salary = salary / 30, Daily per-day salary = salary.
+function computeOvertime(records, employee, salaryTypeLower) {
+  const base     = parseFloat(employee.salary) || 0;
+  const stdHours = parseFloat(employee.standard_working_hours) || 8;
+  const perDay   = salaryTypeLower === 'monthly' ? base / 30 : base;
+  const custom   = parseFloat(employee.overtime_rate);
+  const rate     = custom > 0 ? custom : (stdHours > 0 ? perDay / stdHours : 0);
+
+  const hours = records
+    .filter(r => r.status === 'Present' || r.status === 'Half_Day')
+    .reduce((s, r) => s + (parseFloat(r.overtime_hours) || 0), 0);
+
+  return { hours, rate, amount: hours * rate };
 }
 
 // ── Helper: check for overlapping salary period ───────────────────────────────
@@ -91,15 +111,18 @@ exports.calculateSalary = async (req, res) => {
 
     const { present, absent, halfDays, leave } = summarise(records, totalDays);
 
-    let calculatedSalary = 0;
     const baseSalary = parseFloat(employee.salary) || 0;
-
     const salaryType = (employee.salary_type || '').toString().trim().toLowerCase();
 
+    let regularSalary = 0;
+    let overtime = { hours: 0, rate: 0, amount: 0 };
+
     if (salaryType === 'monthly') {
-      calculatedSalary = present * (baseSalary / 30);
+      regularSalary = present * (baseSalary / 30);
+      overtime = computeOvertime(records, employee, 'monthly');
     } else if (salaryType === 'daily') {
-      calculatedSalary = present * baseSalary;
+      regularSalary = present * baseSalary;
+      overtime = computeOvertime(records, employee, 'daily');
     } else if (salaryType.includes('contract')) {
       const workEntries = await ContractWorkEntry.findAll({
         where: {
@@ -110,8 +133,11 @@ exports.calculateSalary = async (req, res) => {
           },
         },
       });
-      calculatedSalary = workEntries.reduce((sum, e) => sum + (parseFloat(e.total_amount) || 0), 0);
+      regularSalary = workEntries.reduce((sum, e) => sum + (parseFloat(e.total_amount) || 0), 0);
+      // Contract workers are paid per unit — no overtime
     }
+
+    const calculatedSalary = regularSalary + overtime.amount;
 
     const outstandingAdvances = await AdvancePayment.findAll({
       where: { employee_id: empId, entry_type: 'credit', salary_payment_id: null },
@@ -125,53 +151,37 @@ exports.calculateSalary = async (req, res) => {
 
     const totalOutstandingAdvance = outstandingAdvances.reduce((s, a) => s + parseFloat(a.amount), 0);
     const totalOutstandingExpense = outstandingExpenses.reduce((s, e) => s + parseFloat(e.amount), 0);
-    const totalOutstandingCredit = totalOutstandingAdvance + totalOutstandingExpense;
+    const totalOutstandingCredit  = totalOutstandingAdvance + totalOutstandingExpense;
 
     const currentBalance = await getEmployeeBalance(empId);
 
     const netSalary = Math.max(0, calculatedSalary - totalOutstandingCredit);
 
+    // ── Suggested auto-deduction (advances first, then expenses) ─────────────
     let advanceDeduction = 0;
     let expenseDeduction = 0;
-    let remainingCredit = 0;
 
     if (calculatedSalary > 0) {
       let remainingSalary = calculatedSalary;
 
       for (const advance of outstandingAdvances) {
+        if (remainingSalary <= 0) break;
         const amount = parseFloat(advance.amount);
-        if (remainingSalary >= amount) {
-          advanceDeduction += amount;
-          remainingSalary -= amount;
-        } else {
-          advanceDeduction += remainingSalary;
-          remainingSalary = 0;
-          remainingCredit += amount - remainingSalary;
-          break;
-        }
+        const take = Math.min(remainingSalary, amount);
+        advanceDeduction += take;
+        remainingSalary  -= take;
       }
 
-      if (remainingSalary > 0) {
-        for (const expense of outstandingExpenses) {
-          const amount = parseFloat(expense.amount);
-          if (remainingSalary >= amount) {
-            expenseDeduction += amount;
-            remainingSalary -= amount;
-          } else {
-            expenseDeduction += remainingSalary;
-            remainingSalary = 0;
-            remainingCredit += amount - remainingSalary;
-            break;
-          }
-        }
-      }
-
-      if (remainingSalary === 0 && outstandingExpenses.length > 0) {
-        const deductedExpenseTotal = expenseDeduction;
-        const totalExpenseAmount = totalOutstandingExpense;
-        remainingCredit = totalExpenseAmount - deductedExpenseTotal;
+      for (const expense of outstandingExpenses) {
+        if (remainingSalary <= 0) break;
+        const amount = parseFloat(expense.amount);
+        const take = Math.min(remainingSalary, amount);
+        expenseDeduction += take;
+        remainingSalary  -= take;
       }
     }
+
+    const remainingCredit = Math.max(0, totalOutstandingCredit - advanceDeduction - expenseDeduction);
 
     res.json({
       success: true,
@@ -187,13 +197,18 @@ exports.calculateSalary = async (req, res) => {
         absent_days:       absent,
         half_days:         halfDays,
         leave_days:        leave,
-        calculated_salary: Math.round(calculatedSalary * 100) / 100,
-        current_balance:   Math.round(currentBalance * 100) / 100,
-        total_outstanding_credit: Math.round(totalOutstandingCredit * 100) / 100,
-        advance_deduction: Math.round(advanceDeduction * 100) / 100,
-        expense_deduction: Math.round(expenseDeduction * 100) / 100,
-        remaining_credit:  Math.round(remainingCredit * 100) / 100,
-        net_salary:        Math.round(netSalary * 100) / 100,
+        // calculated_salary = regular_salary + overtime_amount
+        regular_salary:    round2(regularSalary),
+        overtime_hours:    round2(overtime.hours),
+        overtime_rate:     round2(overtime.rate),
+        overtime_amount:   round2(overtime.amount),
+        calculated_salary: round2(calculatedSalary),
+        current_balance:   round2(currentBalance),
+        total_outstanding_credit: round2(totalOutstandingCredit),
+        advance_deduction: round2(advanceDeduction),
+        expense_deduction: round2(expenseDeduction),
+        remaining_credit:  round2(remainingCredit),
+        net_salary:        round2(netSalary),
         outstanding_advances:  outstandingAdvances,
         outstanding_expenses:  outstandingExpenses,
       },
@@ -211,8 +226,9 @@ exports.saveSalaryPayment = async (req, res) => {
       employee_id, from_date, to_date,
       total_days, present_days, absent_days, half_days, leave_days,
       base_salary, calculated_salary, paid_amount,
+      overtime_hours, overtime_amount,
       advance_deduction, expense_deduction,
-      advance_deductions, expense_deductions, // ← [{id, amount}] — replaces advance_ids/expense_ids
+      advance_deductions, expense_deductions, // ← [{id, amount}]
       notes, payment_date,
     } = req.body;
 
@@ -236,6 +252,8 @@ exports.saveSalaryPayment = async (req, res) => {
         employee_id, from_date, to_date,
         total_days, present_days, absent_days, half_days, leave_days,
         base_salary, calculated_salary,
+        overtime_hours:  overtime_hours  ?? 0,
+        overtime_amount: overtime_amount ?? 0,
         advance_deduction: advance_deduction ?? 0,
         expense_deduction: expense_deduction ?? 0,
         paid_amount: paid_amount ?? calculated_salary,

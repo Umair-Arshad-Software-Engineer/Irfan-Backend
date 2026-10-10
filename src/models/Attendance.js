@@ -1,3 +1,4 @@
+// models/Attendance.js
 const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize) => {
@@ -20,6 +21,13 @@ module.exports = (sequelize) => {
       type: DataTypes.ENUM('Present', 'Absent', 'Half_Day', 'Leave'),
       allowNull: false,
       defaultValue: 'Present',
+    },
+    // Extra hours worked beyond standard hours (only for Present / Half_Day)
+    overtime_hours: {
+      type: DataTypes.DECIMAL(4, 2),
+      allowNull: false,
+      defaultValue: 0,
+      validate: { min: 0, max: 24 },
     },
     notes: {
       type: DataTypes.STRING(255),

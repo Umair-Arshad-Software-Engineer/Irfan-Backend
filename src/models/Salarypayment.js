@@ -1,3 +1,4 @@
+// models/SalaryPayment.js
 const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize) => {
@@ -12,7 +13,11 @@ module.exports = (sequelize) => {
     half_days:         { type: DataTypes.INTEGER,       allowNull: false, defaultValue: 0 },
     leave_days:        { type: DataTypes.INTEGER,       allowNull: false, defaultValue: 0 },
     base_salary:       { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+    // calculated_salary already INCLUDES overtime_amount
     calculated_salary: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+    // ── Overtime ────────────────────────────────────────────────────────────
+    overtime_hours:    { type: DataTypes.DECIMAL(6, 2),  allowNull: false, defaultValue: 0 },
+    overtime_amount:   { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
     // ── Deductions ──────────────────────────────────────────────────────────
     advance_deduction: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
     expense_deduction: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
