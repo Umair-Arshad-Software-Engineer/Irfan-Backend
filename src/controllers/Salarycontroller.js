@@ -5,6 +5,10 @@ const { Employee, Attendance, SalaryPayment, AdvancePayment, EmployeeExpense, Co
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+// Monthly salary is divided by this many days to get the per-day rate.
+// Change to 26 / 31 etc. here if your business pays differently.
+const DAYS_PER_MONTH = 30;
+
 // ── Helper: calendar days (inclusives) ────────────────────────────────────────
 function countCalendarDays(from, to) {
   const diff = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
@@ -31,7 +35,7 @@ function summarise(records, totalDays) {
 function computeOvertime(records, employee, salaryTypeLower) {
   const base     = parseFloat(employee.salary) || 0;
   const stdHours = parseFloat(employee.standard_working_hours) || 8;
-  const perDay   = salaryTypeLower === 'monthly' ? base / 30 : base;
+  const perDay   = salaryTypeLower === 'monthly' ? base / DAYS_PER_MONTH : base;
   const custom   = parseFloat(employee.overtime_rate);
   const rate     = custom > 0 ? custom : (stdHours > 0 ? perDay / stdHours : 0);
 
@@ -114,11 +118,14 @@ exports.calculateSalary = async (req, res) => {
     const baseSalary = parseFloat(employee.salary) || 0;
     const salaryType = (employee.salary_type || '').toString().trim().toLowerCase();
 
+    const perDaySalary = salaryType === 'monthly' ? baseSalary / DAYS_PER_MONTH
+                       : salaryType === 'daily'   ? baseSalary : 0;
+
     let regularSalary = 0;
     let overtime = { hours: 0, rate: 0, amount: 0 };
 
     if (salaryType === 'monthly') {
-      regularSalary = present * (baseSalary / 30);
+      regularSalary = present * (baseSalary / DAYS_PER_MONTH);
       overtime = computeOvertime(records, employee, 'monthly');
     } else if (salaryType === 'daily') {
       regularSalary = present * baseSalary;
@@ -190,6 +197,7 @@ exports.calculateSalary = async (req, res) => {
         employee_name:     employee.name,
         salary_type:       employee.salary_type,
         base_salary:       baseSalary,
+        per_day_salary:    round2(perDaySalary),
         from_date,
         to_date,
         total_days:        totalDays,
