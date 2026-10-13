@@ -560,7 +560,6 @@ exports.addExpense = async (req, res) => {
 };
 
 // POST /expense-sessions/:sessionId/supplier-payments
-// Adds a supplier payment FROM this cash session + records in supplier ledger
 exports.addSupplierPayment = async (req, res) => {
   const dbTransaction = await sequelize.transaction();
   try {
@@ -579,12 +578,6 @@ exports.addSupplierPayment = async (req, res) => {
       entry_date,
     } = req.body;
 
-    // This is the fix: previously the SupplierLedger.transaction_date and
-    // the cashbook entry_date were hardcoded to `new Date()`, so a vendor
-    // payment backdated in the app would still show up as "today" in the
-    // supplier ledger / statement and in the cashbook, even though the
-    // DailyExpense row itself had the correct entry_time. Every date field
-    // below now shares this single resolved value.
     const effectiveDate = resolveEffectiveDate(entry_date);
 
     if (!supplier_id) {
@@ -624,14 +617,13 @@ exports.addSupplierPayment = async (req, res) => {
         await dbTransaction.rollback();
         return res.status(404).json({ success: false, message: 'Bank not found' });
       }
-      if (payment_method === 'bank') {
-        if (parseFloat(selectedBank.balance) < paymentAmount) {
-          await dbTransaction.rollback();
-          return res.status(400).json({
-            success: false,
-            message: `Insufficient bank balance. Available: Rs ${parseFloat(selectedBank.balance).toFixed(2)}`,
-          });
-        }
+      // Check bank balance for both bank AND cheque (since cheque is auto-cleared)
+      if (parseFloat(selectedBank.balance) < paymentAmount) {
+        await dbTransaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient bank balance. Available: Rs ${parseFloat(selectedBank.balance).toFixed(2)}`,
+        });
       }
     }
 
@@ -648,7 +640,7 @@ exports.addSupplierPayment = async (req, res) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 1: Create cheque record if method = cheque
+    // STEP 1: Create cheque record if method = cheque (AUTO-CLEARED)
     // ═══════════════════════════════════════════════════════════════════════
     let resolvedChequeId = cheque_id || null;
     if (payment_method === 'cheque' && !cheque_id && bank_id && cheque_number) {
@@ -657,16 +649,40 @@ exports.addSupplierPayment = async (req, res) => {
           bank_id,
           cheque_number,
           cheque_type: 'issued',
+          status: 'cleared',                          // ← AUTO-CLEARED
           amount: paymentAmount.toFixed(2),
           payee_payer_name: supplier.name,
           description: description || `Payment to supplier: ${supplier.name}`,
           issue_date: cheque_date || effectiveDate.toISOString().slice(0, 10),
           due_date: cheque_date || null,
+          cleared_date: cheque_date || effectiveDate.toISOString().slice(0, 10), // ← SET
           supplier_id,
         },
         { transaction: dbTransaction }
       );
       resolvedChequeId = cheque.id;
+
+      // Since cheque is auto-cleared, deduct from bank balance immediately
+      if (selectedBank) {
+        const newBalance = parseFloat(selectedBank.balance) - paymentAmount;
+        await selectedBank.update(
+          { balance: newBalance.toFixed(2) },
+          { transaction: dbTransaction }
+        );
+        await BankTransaction.create(
+          {
+            bank_id,
+            transaction_type: 'out',
+            amount: paymentAmount.toFixed(2),
+            description: `Cheque cleared - #${cheque_number} to ${supplier.name}`,
+            reference_number: cheque_number,
+            balance_after: newBalance.toFixed(2),
+            created_by: req.user?.id,
+            transaction_date: effectiveDate,
+          },
+          { transaction: dbTransaction }
+        );
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -699,7 +715,10 @@ exports.addSupplierPayment = async (req, res) => {
         bank_id: bank_id || null,
         cheque_number: cheque_number || null,
         cheque_date: cheque_date ? new Date(cheque_date + 'T00:00:00.000Z') : null,
-        cheque_cleared: false,
+        cheque_cleared: payment_method === 'cheque' ? true : false,        // ← AUTO-CLEARED
+        cheque_cleared_date: payment_method === 'cheque' 
+          ? new Date(cheque_date || effectiveDate) 
+          : null,
         created_by: req.user?.id,
       },
       { transaction: dbTransaction }
@@ -717,9 +736,9 @@ exports.addSupplierPayment = async (req, res) => {
     await recalculateBalances(supplier_id, dbTransaction);
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 3: Update bank balance for bank transfers
+    // STEP 3: Update bank balance for bank transfers (NOT cheque - handled in STEP 1)
     // ═══════════════════════════════════════════════════════════════════════
-    if (selectedBank && payment_method === 'bank') {
+    if (selectedBank && payment_method === 'bank') {   // ← Only 'bank'
       const newBalance = parseFloat(selectedBank.balance) - paymentAmount;
       await selectedBank.update({ balance: newBalance.toFixed(2) }, { transaction: dbTransaction });
       await BankTransaction.create(
@@ -791,7 +810,7 @@ exports.addSupplierPayment = async (req, res) => {
       success: true,
       message:
         payment_method === 'cheque'
-          ? 'Cheque payment recorded. Bank balance updates when cheque clears.'
+          ? 'Cheque payment recorded and cleared. Bank balance updated.'
           : 'Supplier payment recorded and deducted from session balance',
       data: {
         expense_entry: expenseEntry,
