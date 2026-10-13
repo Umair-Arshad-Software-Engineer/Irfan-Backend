@@ -56,7 +56,6 @@ exports.createSupplierPayment = async (req, res) => {
         return res.status(404).json({ success: false, message: 'Selected bank not found' });
       }
 
-      // Balance check applies to bank AND cleared cheques now
       const bankBalance = parseFloat(selectedBank.balance);
       if (bankBalance < paymentAmount) {
         await dbTransaction.rollback();
@@ -88,7 +87,7 @@ exports.createSupplierPayment = async (req, res) => {
 
     const finalDescription = description?.trim() || autoDesc;
 
-    // ✅ CHEQUE: cleared instantly
+    // Cheque is cleared instantly
     const clearedDate = isCheque
       ? (transaction_date ? new Date(transaction_date) : new Date())
       : null;
@@ -108,8 +107,8 @@ exports.createSupplierPayment = async (req, res) => {
       bank_id: bank_id || null,
       cheque_number: cheque_number || null,
       cheque_date: cheque_date ? new Date(cheque_date + 'T00:00:00.000Z') : null,
-      cheque_cleared: isCheque ? true : false,          // ✅
-      cheque_cleared_date: clearedDate,                 // ✅
+      cheque_cleared: isCheque ? true : false,
+      cheque_cleared_date: clearedDate,
       created_by: req.user?.id,
     }, { transaction: dbTransaction });
 
@@ -123,8 +122,8 @@ exports.createSupplierPayment = async (req, res) => {
           supplier_ledger_id: ledgerEntry.id,
           payee_payer_name: supplier.name,
           description: description || `Payment to supplier: ${supplier.name}`,
-          status: 'cleared',                              // ✅
-          cleared_date: clearedDate || new Date(),        // ✅
+          status: 'cleared',
+          cleared_date: clearedDate || new Date(),
         },
         { where: { id: cheque_id }, transaction: dbTransaction }
       );
@@ -272,6 +271,10 @@ exports.getSupplierPayments = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ✅ DELETE SUPPLIER PAYMENT
+//    - Deletes the original BankTransaction (no reversal row created)
+//    - Deletes the linked Cheque row
+//    - Deletes the cashbook entry
+//    - Recalculates supplier balance
 // ═══════════════════════════════════════════════════════════════════════════
 exports.deleteSupplierPayment = async (req, res) => {
   const dbTransaction = await sequelize.transaction();
@@ -295,7 +298,9 @@ exports.deleteSupplierPayment = async (req, res) => {
 
     const paymentAmount = parseFloat(entry.debit);
 
-    // STEP 1: Reverse bank transaction for bank OR cleared cheque
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 1: Reverse bank balance + DELETE original bank transaction
+    // ═══════════════════════════════════════════════════════════════════════
     if ((entry.payment_method === 'bank' || entry.payment_method === 'cheque') && entry.bank_id) {
       const bank = await Bank.findByPk(entry.bank_id, { transaction: dbTransaction });
 
@@ -306,19 +311,29 @@ exports.deleteSupplierPayment = async (req, res) => {
           { transaction: dbTransaction }
         );
 
-        await BankTransaction.destroy({
+        // Find the matching original bank transaction and DELETE it (no reversal)
+        const originalTxn = await BankTransaction.findOne({
           where: {
             bank_id: entry.bank_id,
-            reference_number: entry.cheque_number || entry.reference_number,
+            transaction_type: 'out',
             amount: paymentAmount.toFixed(2),
-            transaction_type: 'out'
+            reference_number: entry.cheque_number || entry.reference_number,
+            // Narrow by date to reduce chance of collision
+            transaction_date: entry.transaction_date,
           },
-          transaction: dbTransaction
+          transaction: dbTransaction,
+          order: [['id', 'DESC']],
         });
+
+        if (originalTxn) {
+          await originalTxn.destroy({ transaction: dbTransaction });
+        }
       }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
     // STEP 2: Delete cheque record
+    // ═══════════════════════════════════════════════════════════════════════
     if (entry.cheque_number && entry.reference_id) {
       await Cheque.destroy({
         where: { id: entry.reference_id },
@@ -326,7 +341,9 @@ exports.deleteSupplierPayment = async (req, res) => {
       });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
     // STEP 3: Delete cashbook entries
+    // ═══════════════════════════════════════════════════════════════════════
     const { SimpleCashbook, Cashbook } = require('../models');
 
     const simpleCashbookEntry = await SimpleCashbook.findOne({
@@ -351,10 +368,14 @@ exports.deleteSupplierPayment = async (req, res) => {
       });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
     // STEP 4: Delete original payment entry
+    // ═══════════════════════════════════════════════════════════════════════
     await entry.destroy({ transaction: dbTransaction });
 
-    // STEP 5: Recalculate balances
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 5: Recalculate supplier ledger balances
+    // ═══════════════════════════════════════════════════════════════════════
     const remainingEntries = await SupplierLedger.findAll({
       where: { supplier_id: supplierId },
       order: [['transaction_date', 'ASC'], ['id', 'ASC']],
@@ -367,7 +388,9 @@ exports.deleteSupplierPayment = async (req, res) => {
       await remainingEntry.update({ balance: runningBalance.toFixed(2) }, { transaction: dbTransaction });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
     // STEP 6: Update supplier balance
+    // ═══════════════════════════════════════════════════════════════════════
     await Supplier.update(
       { balance: runningBalance.toFixed(2) },
       { where: { id: supplierId }, transaction: dbTransaction }
