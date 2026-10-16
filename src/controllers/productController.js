@@ -1,6 +1,6 @@
 // controllers/productController.js
-const { Op } = require('sequelize');
-const { sequelize } = require('../models'); // ← ADD THIS LINE
+const { Op, fn, literal, where: sqlWhere, col } = require('sequelize');
+const { sequelize } = require('../models');
 
 const {
   Product,
@@ -17,6 +17,25 @@ const {
   PurchaseOrder,
   BuildTransaction,
 } = require('../models');
+
+// ── Query-string helpers ─────────────────────────────────────────────────────
+// Query values always arrive as strings.
+const parseBool = (v) => {
+  if (v === true || v === 'true' || v === '1') return true;
+  if (v === false || v === 'false' || v === '0') return false;
+  return undefined;
+};
+
+const parseId = (v) => {
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? undefined : n;
+};
+
+// Only these columns may be used for ?sort_by=
+const SORTABLE_COLUMNS = [
+  'item_name', 'cost_price', 'sale_price', 'physical_qty',
+  'min_stock', 'created_at', 'updated_at',
+];
 
 
 exports.getProductHistory = async (req, res) => {
@@ -147,40 +166,63 @@ exports.getAllProducts = async (req, res) => {
       search,
       page = 1,
       limit = 20,
-      supplier_id,
-      category_id,
-      subcategory_id,
-      unit_id,
-      low_stock,
-      active,
-      has_multiple_lengths,
-      is_bom, // NEW: Filter by BOM type
+      is_bom,
       sort_by = 'item_name',
-      sort_order = 'ASC'
+      sort_order = 'ASC',
     } = req.query;
 
-    const pageNum  = parseInt(page);
-    const limitNum = parseInt(limit);
+    const pageNum  = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 500);
     const offset   = (pageNum - 1) * limitNum;
 
     const whereClause = {};
+    const and = [];
 
-    if (search) {
+    // ── search: name / description / barcode ────────────────────────────────
+    const searchText = (search || '').trim();
+    if (searchText) {
       whereClause[Op.or] = [
-        { item_name:   { [Op.like]: `%${search}%` } },
-        { description: { [Op.like]: `%${search}%` } },
-        { barcode:     { [Op.like]: `%${search}%` } },
+        { item_name:   { [Op.like]: `%${searchText}%` } },
+        { description: { [Op.like]: `%${searchText}%` } },
+        { barcode:     { [Op.like]: `%${searchText}%` } },
       ];
     }
 
-    if (supplier_id)           whereClause.supplier_id          = supplier_id;
-    if (category_id)           whereClause.category_id          = category_id;
-    if (subcategory_id)        whereClause.subcategory_id       = subcategory_id;
-    if (unit_id)               whereClause.unit_id              = unit_id;
-    if (active !== undefined)  whereClause.is_active            = active === 'true';
-    if (has_multiple_lengths !== undefined)
-                               whereClause.has_multiple_lengths = has_multiple_lengths === 'true';
-    if (is_bom !== undefined)  whereClause.is_bom               = is_bom === 'true'; // NEW
+    // ── id filters ───────────────────────────────────────────────────────────
+    const supplierId    = parseId(req.query.supplier_id);
+    const categoryId    = parseId(req.query.category_id);
+    const subcategoryId = parseId(req.query.subcategory_id);
+    const unitId        = parseId(req.query.unit_id);
+
+    if (supplierId    !== undefined) whereClause.supplier_id    = supplierId;
+    if (categoryId    !== undefined) whereClause.category_id    = categoryId;
+    if (subcategoryId !== undefined) whereClause.subcategory_id = subcategoryId;
+    if (unitId        !== undefined) whereClause.unit_id        = unitId;
+
+    // ── boolean filters ──────────────────────────────────────────────────────
+    const activeFlag = parseBool(req.query.active);
+    if (activeFlag !== undefined) whereClause.is_active = activeFlag;
+
+    const multiLengthFlag = parseBool(req.query.has_multiple_lengths);
+    if (multiLengthFlag !== undefined) whereClause.has_multiple_lengths = multiLengthFlag;
+
+    const bomFlag = parseBool(is_bom);
+    if (bomFlag !== undefined) whereClause.is_bom = bomFlag;
+
+    // ── LOW STOCK: physical_qty <= min_stock (column vs column) ─────────────
+    // There is no low_stock column, so this must be a column comparison.
+    const lowStockFlag = parseBool(req.query.low_stock);
+    if (lowStockFlag === true) {
+      and.push(sqlWhere(col('Product.physical_qty'), Op.lte, col('Product.min_stock')));
+    } else if (lowStockFlag === false) {
+      and.push(sqlWhere(col('Product.physical_qty'), Op.gt, col('Product.min_stock')));
+    }
+
+    if (and.length) whereClause[Op.and] = and;
+
+    // ── sorting (whitelisted) ────────────────────────────────────────────────
+    const sortColumn = SORTABLE_COLUMNS.includes(sort_by) ? sort_by : 'item_name';
+    const sortDir    = String(sort_order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
     const { count, rows: products } = await Product.findAndCountAll({
       where: whereClause,
@@ -198,19 +240,31 @@ exports.getAllProducts = async (req, res) => {
       ],
       attributes: [
         'id', 'item_name', 'description', 'cost_price', 'sale_price',
+        'supplier_id', 'category_id', 'subcategory_id', 'unit_id',
         'barcode', 'min_stock', 'physical_qty', 'available_qty',
         'length_combinations', 'has_multiple_lengths',
         'is_active', 'created_at', 'updated_at',
-        'is_bom', 'bom_components', 'bom_total_cost', // NEW BOM fields
+        'is_bom', 'bom_components', 'bom_total_cost',
       ],
-      order: [[sort_by, sort_order]],
+      order: [[sortColumn, sortDir]],
       limit: limitNum,
       offset,
       distinct: true,
     });
 
-    const totalValue = products.reduce((sum, p) =>
-      sum + (parseFloat(p.cost_price) * p.physical_qty), 0);
+    // ── summary across ALL products matching the filters (not just this page) ─
+    const lowStockCondition = sqlWhere(col('Product.physical_qty'), Op.lte, col('Product.min_stock'));
+
+    const lowStockCount = await Product.count({
+      where: { ...whereClause, [Op.and]: [...and, lowStockCondition] },
+    });
+
+    const valueRow = await Product.findOne({
+      where: whereClause,
+      attributes: [[fn('SUM', literal('`Product`.`cost_price` * `Product`.`physical_qty`')), 'total_value']],
+      raw: true,
+    });
+    const totalValue = parseFloat(valueRow?.total_value) || 0;
 
     res.json({
       success: true,
@@ -219,13 +273,13 @@ exports.getAllProducts = async (req, res) => {
         total: count,
         page: pageNum,
         limit: limitNum,
-        pages: Math.ceil(count / limitNum),
+        pages: Math.max(Math.ceil(count / limitNum), 1),
       },
       summary: {
-        total_products:   count,
-        total_value:      totalValue,
-        low_stock_count:  products.filter(p => p.physical_qty <= p.min_stock).length,
-        bom_count:        products.filter(p => p.is_bom).length, // NEW
+        total_products:  count,
+        total_value:     totalValue,
+        low_stock_count: lowStockCount,
+        bom_count:       products.filter(p => p.is_bom).length, // current page only
       },
     });
   } catch (error) {
@@ -319,7 +373,7 @@ function normaliseBomComponents(rawComponents, productId = null) {
   if (!Array.isArray(rawComponents) || rawComponents.length === 0) {
     return null;
   }
-  
+
   // Validate that components don't reference themselves
   const validatedComponents = rawComponents
     .filter(comp => !productId || (comp.productId !== productId && comp.product_id !== productId))
@@ -332,17 +386,17 @@ function normaliseBomComponents(rawComponents, productId = null) {
       const cost_per_unit = parseFloat(comp.costPerUnit || comp.cost_per_unit) || 0;
       const total_cost = parseFloat(comp.totalCost || comp.total_cost) || (cost_per_unit * quantity);
       const notes = comp.notes || null;
-      
+
       // Log for debugging
       console.log(`Processing component: ${product_name} (${product_id}) - Quantity: ${quantity}`);
-      
+
       // Allow negative quantities (for byproducts/wastage), but ensure product exists
       // Only filter out if quantity is zero or product_id/name missing
       if (!product_id || !product_name || quantity === 0) {
         console.warn('Invalid BOM component:', comp);
         return null;
       }
-      
+
       return {
         id: comp.id || String(Date.now() + i),
         product_id: product_id,
@@ -355,7 +409,7 @@ function normaliseBomComponents(rawComponents, productId = null) {
       };
     })
     .filter(comp => comp !== null); // Remove invalid components
-  
+
   console.log(`Normalized ${validatedComponents.length} BOM components`);
   return validatedComponents.length > 0 ? validatedComponents : null;
 }
@@ -363,11 +417,6 @@ function normaliseBomComponents(rawComponents, productId = null) {
 function calculateBomTotalCost(components) {
   if (!components || !Array.isArray(components)) return null;
   // Sum all costs, including negative ones (which reduce total cost)
-  return components.reduce((sum, comp) => sum + (comp.total_cost || 0), 0);
-}
-
-function calculateBomTotalCost(components) {
-  if (!components || !Array.isArray(components)) return null;
   return components.reduce((sum, comp) => sum + (comp.total_cost || 0), 0);
 }
 
@@ -417,7 +466,7 @@ exports.createProduct = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Subcategory not found' });
 
     const { lengthCombinations, hasMultipleLengths } = normaliseLengths(length_combinations);
-    
+
     // Process BOM components
     let bomComponents = null;
     let bomTotalCost = null;
@@ -425,11 +474,11 @@ exports.createProduct = async (req, res) => {
       console.log('Processing BOM components:', bom_components);
       bomComponents = normaliseBomComponents(bom_components);
       console.log('Normalized BOM components:', bomComponents);
-      
+
       if (bomComponents && bomComponents.length > 0) {
         bomTotalCost = calculateBomTotalCost(bomComponents);
         console.log('BOM total cost:', bomTotalCost);
-        
+
         // Validate all component products exist
         for (const comp of bomComponents) {
           const componentProduct = await Product.findByPk(comp.product_id);
@@ -552,18 +601,18 @@ exports.updateProduct = async (req, res) => {
     // Process BOM components
     let bomComponents = product.bom_components;
     let bomTotalCost = product.bom_total_cost;
-    
+
     if (is_bom !== undefined || bom_components !== undefined) {
       const newIsBom = is_bom !== undefined ? is_bom : product.is_bom;
       const newComponents = bom_components !== undefined ? bom_components : product.bom_components;
-      
+
       if (newIsBom && newComponents && Array.isArray(newComponents) && newComponents.length > 0) {
         bomComponents = normaliseBomComponents(newComponents, parseInt(id));
         console.log('Normalized BOM components for update:', bomComponents);
-        
+
         if (bomComponents && bomComponents.length > 0) {
           bomTotalCost = calculateBomTotalCost(bomComponents);
-          
+
           // Validate all component products exist
           for (const comp of bomComponents) {
             const componentProduct = await Product.findByPk(comp.product_id);
@@ -643,12 +692,12 @@ exports.deleteProduct = async (req, res) => {
         bom_components: { [Op.ne]: null }
       }
     });
-    
+
     const isUsedInBom = bomProducts.some(bom => {
       if (!bom.bom_components) return false;
       return bom.bom_components.some(comp => comp.product_id === parseInt(id));
     });
-    
+
     if (isUsedInBom) {
       return res.status(400).json({
         success: false,
@@ -706,6 +755,8 @@ exports.updateProductQuantity = async (req, res) => {
     const product = await Product.findByPk(id);
     if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
 
+    const oldQuantity = product.physical_qty; // capture BEFORE update()
+
     let newQuantity;
     switch (operation) {
       case 'add':
@@ -734,7 +785,7 @@ exports.updateProductQuantity = async (req, res) => {
       data: {
         id:           product.id,
         item_name:    product.item_name,
-        old_quantity: product.physical_qty,
+        old_quantity: oldQuantity,
         new_quantity: newQuantity,
         is_low_stock: newQuantity <= product.min_stock,
       },
@@ -748,7 +799,6 @@ exports.updateProductQuantity = async (req, res) => {
 // Get low stock products
 exports.getLowStockProducts = async (req, res) => {
   try {
-    const { Op, literal } = require('sequelize');
     const products = await Product.findAll({
       where: { is_active: true, physical_qty: { [Op.lte]: literal('min_stock') } },
       include: [
@@ -801,19 +851,19 @@ exports.getProductsBySupplier = async (req, res) => {
 exports.getBomStructure = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     const product = await Product.findByPk(id, {
       where: { is_bom: true },
       attributes: ['id', 'item_name', 'description', 'bom_components', 'bom_total_cost', 'cost_price', 'sale_price'],
     });
-    
+
     if (!product) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'BOM product not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'BOM product not found'
       });
     }
-    
+
     // Fetch full details for each component
     let componentsWithDetails = [];
     if (product.bom_components && product.bom_components.length > 0) {
@@ -823,7 +873,7 @@ exports.getBomStructure = async (req, res) => {
         attributes: ['id', 'item_name', 'cost_price', 'sale_price', 'unit_id', 'physical_qty'],
         include: [{ model: Unit, as: 'unit', attributes: ['id', 'name', 'symbol'] }],
       });
-      
+
       componentsWithDetails = product.bom_components.map(comp => {
         const productDetail = componentProducts.find(p => p.id === comp.product_id);
         return {
@@ -832,7 +882,7 @@ exports.getBomStructure = async (req, res) => {
         };
       });
     }
-    
+
     res.json({
       success: true,
       data: {
@@ -857,28 +907,28 @@ exports.getBomStructure = async (req, res) => {
 exports.calculateBomCost = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     const product = await Product.findByPk(id, {
       where: { is_bom: true },
       attributes: ['id', 'item_name', 'bom_components'],
     });
-    
+
     if (!product || !product.bom_components) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'BOM product not found or has no components' 
+      return res.status(404).json({
+        success: false,
+        message: 'BOM product not found or has no components'
       });
     }
-    
+
     // Calculate current cost based on latest component prices
     let totalCost = 0;
     const componentCosts = [];
-    
+
     for (const comp of product.bom_components) {
       const componentProduct = await Product.findByPk(comp.product_id, {
         attributes: ['id', 'item_name', 'cost_price'],
       });
-      
+
       if (componentProduct) {
         const currentCost = componentProduct.cost_price * comp.quantity;
         totalCost += currentCost;
@@ -894,7 +944,7 @@ exports.calculateBomCost = async (req, res) => {
         });
       }
     }
-    
+
     res.json({
       success: true,
       data: {
@@ -904,7 +954,7 @@ exports.calculateBomCost = async (req, res) => {
         current_total_cost: totalCost,
         cost_difference: totalCost - (product.bom_total_cost || 0),
         components: componentCosts,
-        recommendation: totalCost > (product.bom_total_cost || 0) 
+        recommendation: totalCost > (product.bom_total_cost || 0)
           ? 'Consider reviewing selling price as manufacturing cost has increased'
           : 'Manufacturing cost has decreased, you may consider lowering selling price',
       },
@@ -922,16 +972,16 @@ exports.getAllBomProducts = async (req, res) => {
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const offset = (pageNum - 1) * limitNum;
-    
+
     const whereClause = { is_bom: true };
-    
+
     if (search) {
       whereClause[Op.or] = [
         { item_name: { [Op.like]: `%${search}%` } },
         { description: { [Op.like]: `%${search}%` } },
       ];
     }
-    
+
     const { count, rows: products } = await Product.findAndCountAll({
       where: whereClause,
       attributes: [
@@ -946,7 +996,7 @@ exports.getAllBomProducts = async (req, res) => {
       offset,
       order: [['created_at', 'DESC']],
     });
-    
+
     res.json({
       success: true,
       data: products,
@@ -970,6 +1020,7 @@ exports.buildBomProduct = async (req, res) => {
     const { quantity, build_date, notes } = req.body;
 
     if (!quantity || quantity <= 0) {
+      await t.rollback(); // don't leave the transaction open
       return res.status(400).json({ success: false, message: 'Valid quantity is required' });
     }
 
@@ -1024,13 +1075,13 @@ exports.buildBomProduct = async (req, res) => {
     }
 
     // Increment BOM product stock
+    const newStock = bomProduct.physical_qty + quantity; // compute BEFORE update()
     await bomProduct.update({
-      physical_qty:  bomProduct.physical_qty  + quantity,
+      physical_qty:  newStock,
       available_qty: bomProduct.available_qty + quantity,
     }, { transaction: t });
 
-    // Save build transaction in a new table (or you can use JSON in Product notes)
-    // If you have a BuildTransaction model, use that. Otherwise create it:
+    // Save build transaction
     const buildRecord = await BuildTransaction.create({
       product_id:      bomProduct.id,
       product_name:    bomProduct.item_name,
@@ -1050,7 +1101,7 @@ exports.buildBomProduct = async (req, res) => {
       message: `Successfully built ${quantity} × ${bomProduct.item_name}`,
       data: {
         build_transaction: buildRecord,
-        new_stock: bomProduct.physical_qty + quantity,
+        new_stock: newStock,
       },
     });
   } catch (error) {
@@ -1064,28 +1115,28 @@ exports.deleteBuildTransaction = async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const { txId } = req.params;
-    
+
     // Find the build transaction
     const tx = await BuildTransaction.findByPk(txId, { transaction: t });
     if (!tx) {
       await t.rollback();
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Build transaction not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Build transaction not found'
       });
     }
-    
+
     if (tx.is_deleted) {
       await t.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Transaction already deleted' 
+      return res.status(400).json({
+        success: false,
+        message: 'Transaction already deleted'
       });
     }
 
     // Get components used
     const componentsUsed = tx.components_used || [];
-    
+
     // Revert stock for the BOM product
     const bomProduct = await Product.findByPk(tx.product_id, { transaction: t });
     if (bomProduct) {
@@ -1097,7 +1148,7 @@ exports.deleteBuildTransaction = async (req, res) => {
           message: `Cannot revert: ${bomProduct.item_name} has insufficient stock (${bomProduct.physical_qty} available, need ${tx.quantity_built})`,
         });
       }
-      
+
       await bomProduct.update({
         physical_qty: newPhysicalQty,
         available_qty: newPhysicalQty,
@@ -1117,8 +1168,8 @@ exports.deleteBuildTransaction = async (req, res) => {
     }
 
     // Mark as deleted
-    await tx.update({ 
-      is_deleted: true 
+    await tx.update({
+      is_deleted: true
     }, { transaction: t });
 
     await t.commit();
@@ -1136,10 +1187,10 @@ exports.deleteBuildTransaction = async (req, res) => {
   } catch (error) {
     await t.rollback();
     console.error('Delete build transaction error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
     });
   }
 };
@@ -1147,32 +1198,32 @@ exports.deleteBuildTransaction = async (req, res) => {
 // Get all build transactions with pagination and filters
 exports.getBuildTransactions = async (req, res) => {
   try {
-    const { 
-      search, 
-      from_date, 
-      to_date, 
-      page = 1, 
+    const {
+      search,
+      from_date,
+      to_date,
+      page = 1,
       limit = 30,
       show_deleted = false
     } = req.query;
-    
+
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const offset = (pageNum - 1) * limitNum;
-    
+
     const where = {};
-    
+
     if (!show_deleted || show_deleted === 'false') {
       where.is_deleted = false;
     }
-    
+
     if (search) {
       where[Op.or] = [
         { product_name: { [Op.like]: `%${search}%` } },
         { notes: { [Op.like]: `%${search}%` } },
       ];
     }
-    
+
     if (from_date && to_date) {
       where.build_date = { [Op.between]: [from_date, to_date] };
     }
@@ -1213,31 +1264,30 @@ exports.getBuildTransactions = async (req, res) => {
     });
   } catch (error) {
     console.error('Get build transactions error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
     });
   }
 };
 
-// Add this to productController.js
 exports.deleteBomProduct = async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const { id } = req.params;
-    
+
     const product = await Product.findByPk(id, { transaction: t });
     if (!product) {
       await t.rollback();
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
-    
+
     if (!product.is_bom) {
       await t.rollback();
       return res.status(400).json({ success: false, message: 'Product is not a BOM product' });
     }
-    
+
     // Reverse component stock
     if (product.bom_components && product.bom_components.length > 0) {
       for (const comp of product.bom_components) {
@@ -1254,12 +1304,12 @@ exports.deleteBomProduct = async (req, res) => {
         // For negative quantities (byproducts/wastage), we skip
       }
     }
-    
+
     // Delete the product
     await product.destroy({ transaction: t });
-    
+
     await t.commit();
-    
+
     res.json({
       success: true,
       message: 'BOM product deleted and stock reverted successfully',
