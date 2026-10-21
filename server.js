@@ -77,8 +77,8 @@ udpServer.bind(41234, () => {
 
 const ADMIN_USER = {
   name: 'Tech Soft',
-  email: 'techsoft@gmail.com',
-  password: '1129@AliHaider',
+  email: 'swittix@gmail.com',
+  password: '498800',
 };
 
 process.on('uncaughtException', err => console.error('UNCAUGHT EXCEPTION:', err));

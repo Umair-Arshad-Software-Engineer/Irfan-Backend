@@ -55,17 +55,26 @@ exports.createCheque = async (req, res) => {
       });
     }
 
+    const initialStatus = ['pending', 'cleared'].includes(req.body.status)
+      ? req.body.status
+      : 'pending';
+
     const cheque = await Cheque.create({
       bank_id,
       cheque_number: cheque_number.trim(),
       cheque_type,
-      status: 'pending',
+      status: initialStatus,
       amount: parseFloat(amount).toFixed(2),
       payee_payer_name: payee_payer_name.trim(),
       description: description ? description.trim() : null,
       issue_date,
       due_date: due_date || null,
-      created_by: userId
+      cleared_date: initialStatus === 'cleared'
+        ? (req.body.cleared_date || issue_date)
+        : null,
+      bank_transaction_id: req.body.bank_transaction_id || null,
+      supplier_id: req.body.supplier_id || null,
+      created_by: userId,
     }, { transaction: t });
 
     await t.commit();
@@ -140,8 +149,16 @@ exports.getAllCheques = async (req, res) => {
       offset
     });
 
-    const pendingIssued   = rows.filter(c => c.cheque_type === 'issued'   && c.status === 'pending').reduce((s, c) => s + parseFloat(c.amount), 0);
-    const pendingReceived = rows.filter(c => c.cheque_type === 'received' && c.status === 'pending').reduce((s, c) => s + parseFloat(c.amount), 0);
+    const allMatching = await Cheque.findAll({
+      where,
+      attributes: ['cheque_type', 'status', 'amount'],
+    });
+    const pendingIssued   = allMatching
+      .filter(c => c.cheque_type === 'issued' && c.status === 'pending')
+      .reduce((s, c) => s + parseFloat(c.amount), 0);
+    const pendingReceived = allMatching
+      .filter(c => c.cheque_type === 'received' && c.status === 'pending')
+      .reduce((s, c) => s + parseFloat(c.amount), 0);
 
     return res.json({
       success: true,
@@ -351,7 +368,7 @@ exports.clearCheque = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ✅ BOUNCE CHEQUE  →  reverses ledger entries but no bank balance change
+// ✅ BOUNCE CHEQUE
 // ═══════════════════════════════════════════════════════════════════════════
 exports.bounceCheque = async (req, res) => {
   const t = await Cheque.sequelize.transaction();
@@ -372,7 +389,6 @@ exports.bounceCheque = async (req, res) => {
 
     const { bounce_reason } = req.body;
 
-    // Reverse supplier payment if cheque is issued to supplier
     if (cheque.supplier_id && cheque.cheque_type === 'issued') {
       const paymentEntry = await SupplierLedger.findOne({
         where: {
@@ -384,13 +400,11 @@ exports.bounceCheque = async (req, res) => {
       });
 
       if (paymentEntry && !paymentEntry.cheque_cleared) {
-        // ✅ Delete the original payment entry, no reversal row
         await paymentEntry.destroy({ transaction: t });
         await recalculateBalances(cheque.supplier_id, t);
       }
     }
 
-    // Reverse customer payment if cheque is received from customer
     if (cheque.customer_id && cheque.cheque_type === 'received') {
       const paymentEntry = await CustomerLedger.findOne({
         where: {
@@ -402,12 +416,10 @@ exports.bounceCheque = async (req, res) => {
       });
 
       if (paymentEntry) {
-        // ✅ Delete the original payment entry, no reversal row
         await paymentEntry.destroy({ transaction: t });
         await recalculateCustomerBalance(cheque.customer_id, t);
       }
 
-      // Update sale if linked
       if (cheque.sale_id) {
         const sale = await Sale.findByPk(cheque.sale_id, { transaction: t });
         if (sale) {
@@ -446,7 +458,7 @@ exports.bounceCheque = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ✅ CANCEL CHEQUE  →  void it, no bank effect
+// ✅ CANCEL CHEQUE
 // ═══════════════════════════════════════════════════════════════════════════
 exports.cancelCheque = async (req, res) => {
   const t = await Cheque.sequelize.transaction();
@@ -475,8 +487,7 @@ exports.cancelCheque = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ✅ DELETE CHEQUE (pending / cancelled only) - REVERSES ALL EFFECTS
-//    Bank transaction is DELETED (no reversal row created)
+// ✅ DELETE CHEQUE (pending / cancelled only)
 // ═══════════════════════════════════════════════════════════════════════════
 exports.deleteCheque = async (req, res) => {
   const t = await Cheque.sequelize.transaction();
@@ -501,7 +512,6 @@ exports.deleteCheque = async (req, res) => {
       });
     }
 
-    // STEP 1: Reverse bank balance and DELETE the original bank transaction
     if (cheque.bank_transaction_id) {
       const bankTxn = await BankTransaction.findByPk(cheque.bank_transaction_id, { transaction: t });
 
@@ -517,14 +527,11 @@ exports.deleteCheque = async (req, res) => {
             : currentBalance - chequeAmount;
 
           await bank.update({ balance: reversedBalance.toFixed(2) }, { transaction: t });
-
-          // ✅ Delete the original bank transaction — no reversal row created
           await bankTxn.destroy({ transaction: t });
         }
       }
     }
 
-    // STEP 2: Update Supplier Ledger if cheque is linked to supplier
     if (cheque.supplier_id && cheque.cheque_type === 'issued') {
       const paymentEntry = await SupplierLedger.findOne({
         where: {
@@ -536,13 +543,11 @@ exports.deleteCheque = async (req, res) => {
       });
 
       if (paymentEntry) {
-        // ✅ Delete the original payment entry — no reversal row created
         await paymentEntry.destroy({ transaction: t });
         await recalculateBalances(cheque.supplier_id, t);
       }
     }
 
-    // STEP 3: Update Customer Ledger if cheque is linked to customer payment
     if (cheque.customer_id && cheque.cheque_type === 'received') {
       const paymentEntry = await CustomerLedger.findOne({
         where: {
@@ -554,13 +559,11 @@ exports.deleteCheque = async (req, res) => {
       });
 
       if (paymentEntry) {
-        // ✅ Delete the original payment entry — no reversal row created
         await paymentEntry.destroy({ transaction: t });
         await recalculateCustomerBalance(cheque.customer_id, t);
       }
     }
 
-    // STEP 4: Update Sale if cheque is linked to a sale
     if (cheque.sale_id) {
       const sale = await Sale.findByPk(cheque.sale_id, { transaction: t });
 
@@ -578,7 +581,6 @@ exports.deleteCheque = async (req, res) => {
       }
     }
 
-    // STEP 5: Delete the cheque
     await cheque.destroy({ transaction: t });
 
     await t.commit();
@@ -596,8 +598,7 @@ exports.deleteCheque = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ✅ REVERT TO PENDING  →  reverses cleared status and bank effects
-//    Bank transaction is DELETED (no reversal row created)
+// ✅ REVERT TO PENDING
 // ═══════════════════════════════════════════════════════════════════════════
 exports.revertToPending = async (req, res) => {
   const t = await Cheque.sequelize.transaction();
@@ -623,7 +624,6 @@ exports.revertToPending = async (req, res) => {
       });
     }
 
-    // STEP 1: If cheque was cleared, reverse bank balance and DELETE original bank transaction
     if (cheque.status === 'cleared' && cheque.bank_transaction_id) {
       const bankTxn = await BankTransaction.findByPk(cheque.bank_transaction_id, { transaction: t });
 
@@ -639,14 +639,11 @@ exports.revertToPending = async (req, res) => {
             : currentBalance - chequeAmount;
 
           await bank.update({ balance: reversedBalance.toFixed(2) }, { transaction: t });
-
-          // ✅ Delete the original bank transaction — no reversal row created
           await bankTxn.destroy({ transaction: t });
         }
       }
     }
 
-    // STEP 2: If cheque was cleared and tied to a supplier payment, delete that ledger entry
     if (cheque.status === 'cleared' && cheque.supplier_id && cheque.cheque_type === 'issued') {
       const ledgerEntry = await SupplierLedger.findOne({
         where: {
@@ -663,7 +660,6 @@ exports.revertToPending = async (req, res) => {
       }
     }
 
-    // STEP 2b: If cheque was cleared and tied to a customer payment, delete that ledger entry
     if (cheque.status === 'cleared' && cheque.customer_id && cheque.cheque_type === 'received') {
       const ledgerEntry = await CustomerLedger.findOne({
         where: {
@@ -679,7 +675,6 @@ exports.revertToPending = async (req, res) => {
         await recalculateCustomerBalance(cheque.customer_id, t);
       }
 
-      // Also revert linked sale if any
       if (cheque.sale_id) {
         const sale = await Sale.findByPk(cheque.sale_id, { transaction: t });
         if (sale) {
@@ -697,7 +692,6 @@ exports.revertToPending = async (req, res) => {
       }
     }
 
-    // STEP 3: If cheque was bounced, restore supplier/customer ledger entries
     if (cheque.status === 'bounced' && cheque.supplier_id && cheque.cheque_type === 'issued') {
       const reversalEntries = await SupplierLedger.findAll({
         where: {
@@ -730,7 +724,6 @@ exports.revertToPending = async (req, res) => {
       await recalculateCustomerBalance(cheque.customer_id, t);
     }
 
-    // STEP 4: Update cheque status back to pending
     await cheque.update({
       status: 'pending',
       cleared_date: null,

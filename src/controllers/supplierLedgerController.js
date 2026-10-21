@@ -37,7 +37,6 @@ const createLedgerEntry = async ({
   cheque_cleared_date = null,
   transaction,
 }) => {
-  // Insert with a temporary balance of 0 — recalculate will fix it
   const entry = await SupplierLedger.create(
     {
       supplier_id,
@@ -61,15 +60,13 @@ const createLedgerEntry = async ({
     { transaction }
   );
 
-  // Recalculate all balances in correct date+id order
   await recalculateBalances(supplier_id, transaction);
 
-  // Return the entry with its updated balance
   await entry.reload({ transaction });
   return entry;
 };
 
-// ── Reverse a ledger entry (called on receipt delete) ───────────────────────
+// ── Reverse a ledger entry ──────────────────────────────────────────────────
 const reverseLedgerEntry = async ({
   supplier_id,
   reference_type,
@@ -101,7 +98,26 @@ const reverseLedgerEntry = async ({
   return reversal;
 };
 
-// ── GET: supplier ledger with filters & pagination ───────────────────────────
+// ── Shared "uncleared cheque" filter ────────────────────────────────────────
+// A row is INCLUDED when its payment is real money movement:
+//   - not a cheque at all, OR
+//   - a cheque that is cleared, OR
+//   - a legacy row (NULL payment_method, or cheque with NULL cheque_cleared)
+const unclearedChequeExclusionClause = {
+  [Op.or]: [
+    { payment_method: { [Op.ne]: 'cheque' } },
+    { payment_method: { [Op.is]: null } },
+    {
+      payment_method: 'cheque',
+      [Op.or]: [
+        { cheque_cleared: true },
+        { cheque_cleared: { [Op.is]: null } },
+      ],
+    },
+  ],
+};
+
+// ── GET: supplier ledger with filters & pagination ──────────────────────────
 exports.getSupplierLedger = async (req, res) => {
   try {
     const { supplierId } = req.params;
@@ -126,35 +142,26 @@ exports.getSupplierLedger = async (req, res) => {
 
     const whereClause = { supplier_id: supplierId };
 
-    // Date range filter
     if (from_date || to_date) {
       whereClause.transaction_date = {};
       if (from_date) whereClause.transaction_date[Op.gte] = new Date(from_date + 'T00:00:00.000Z');
       if (to_date) whereClause.transaction_date[Op.lte] = new Date(to_date + 'T23:59:59.999Z');
     }
 
-    // Reference type filter
     if (reference_type) whereClause.reference_type = reference_type;
 
-    // For cheque payments, only show cleared cheques by defaults
+    // Only show cleared cheques by default
     if (show_uncleared_cheques !== 'true') {
-      whereClause[Op.or] = [
-        { payment_method: { [Op.ne]: 'cheque' } },
-        { payment_method: 'cheque', cheque_cleared: true },
-        { payment_method: null },
-      ];
+      whereClause[Op.and] = [unclearedChequeExclusionClause];
     }
 
-    // ✅ FIX: Safely handle sort_order
     const allowedSortFields = ['transaction_date', 'id', 'created_at'];
     const safeSortBy = allowedSortFields.includes(sort_by) ? sort_by : 'transaction_date';
-    
-    // Ensure sort_order is a string and provide default
+
     let safeSortOrder = 'ASC';
     if (sort_order && typeof sort_order === 'string') {
       safeSortOrder = sort_order.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
     }
-    // If sort_order is not a valid string, default to 'ASC'
 
     const { count, rows: entries } = await SupplierLedger.findAndCountAll({
       where: whereClause,
@@ -163,17 +170,13 @@ exports.getSupplierLedger = async (req, res) => {
       offset,
     });
 
-    // Summary calculation - should only include cleared cheques for accurate balance
+    // Summary — use the SAME filter as the main list so totals stay accurate
     let allEntries;
     if (show_uncleared_cheques !== 'true') {
       allEntries = await SupplierLedger.findAll({
         where: {
           supplier_id: supplierId,
-          [Op.or]: [
-            { payment_method: { [Op.ne]: 'cheque' } },
-            { payment_method: 'cheque', cheque_cleared: true },
-            { payment_method: null },
-          ]
+          [Op.and]: [unclearedChequeExclusionClause],
         },
         attributes: ['debit', 'credit'],
       });
@@ -215,25 +218,21 @@ exports.getSupplierLedger = async (req, res) => {
   }
 };
 
-// ── GET: all suppliers with their outstanding balance ────────────────────────
+// ── GET: all suppliers with their outstanding balance ───────────────────────
 exports.getAllSupplierBalances = async (req, res) => {
   try {
     const suppliers = await Supplier.findAll({ where: { is_active: true } });
 
     const result = await Promise.all(
       suppliers.map(async (supplier) => {
-        // Only include cleared cheques for accurate outstanding balance
         const entries = await SupplierLedger.findAll({
           where: {
             supplier_id: supplier.id,
-            [Op.or]: [
-              { payment_method: { [Op.ne]: 'cheque' } },
-              { payment_method: 'cheque', cheque_cleared: true },
-              { payment_method: null },
-            ]
+            [Op.and]: [unclearedChequeExclusionClause],
           },
           attributes: ['debit', 'credit'],
         });
+
         const totalDebit = entries.reduce((s, e) => s + parseFloat(e.debit), 0);
         const totalCredit = entries.reduce((s, e) => s + parseFloat(e.credit), 0);
         return {
@@ -252,7 +251,7 @@ exports.getAllSupplierBalances = async (req, res) => {
   }
 };
 
-// ── POST: manual ledger entry ─────────────────────────────────────────────────
+// ── POST: manual ledger entry ──────────────────────────────────────────────
 exports.createManualEntry = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -279,7 +278,7 @@ exports.createManualEntry = async (req, res) => {
   }
 };
 
-// ── PUT: Update cheque cleared status (when cheque is cashed) ─────────────────
+// ── PUT: Update cheque cleared status ──────────────────────────────────────
 exports.updateChequeClearedStatus = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -287,7 +286,7 @@ exports.updateChequeClearedStatus = async (req, res) => {
     const { cheque_cleared, cheque_cleared_date } = req.body;
 
     const ledgerEntry = await SupplierLedger.findByPk(ledgerEntryId, { transaction: t });
-    
+
     if (!ledgerEntry) {
       await t.rollback();
       return res.status(404).json({ success: false, message: 'Ledger entry not found' });
@@ -298,13 +297,11 @@ exports.updateChequeClearedStatus = async (req, res) => {
       return res.status(400).json({ success: false, message: 'This entry is not a cheque payment' });
     }
 
-    // Update cheque cleared status
     await ledgerEntry.update({
       cheque_cleared: cheque_cleared,
       cheque_cleared_date: cheque_cleared ? (cheque_cleared_date || new Date()) : null,
     }, { transaction: t });
 
-    // Recalculate balances after status change
     await recalculateBalances(ledgerEntry.supplier_id, t);
 
     await t.commit();
@@ -321,7 +318,6 @@ exports.updateChequeClearedStatus = async (req, res) => {
   }
 };
 
-// Export helpers for use in other controllers
 module.exports.createLedgerEntry = createLedgerEntry;
 module.exports.reverseLedgerEntry = reverseLedgerEntry;
 module.exports.recalculateBalances = recalculateBalances;
