@@ -12,8 +12,10 @@ const {
   SupplierLedger,
   sequelize,
 } = require('../models');
+const models = require('../models');
 const { recalculateBalances } = require('./supplierLedgerController');
 const { createCashbookEntry } = require('./cashbookController');
+const { deleteSupplierPaymentCascade } = require('../services/supplierPaymentCleanup');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Resolve the "effective" date for a record.
@@ -1094,49 +1096,65 @@ exports.deleteEntry = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Cannot delete from a closed session' });
     }
 
-    // If supplier payment, reverse the ledger entry
+    // ── Hard delete, no reversal rows ────────────────────────────────────────
+    // Supplier payment → remove the supplier ledger row together with its
+    // bank transaction, cheque and cashbook rows, then recalculate the
+    // supplier's running balances. Nothing is written as a "reversal".
+    let supplierLedgerHandled = false;
     if (entry.entry_type === 'supplier_payment' && entry.supplier_ledger_id) {
       const ledgerEntry = await SupplierLedger.findByPk(entry.supplier_ledger_id, {
         transaction: dbTransaction,
       });
       if (ledgerEntry) {
-        await SupplierLedger.create(
-          {
-            supplier_id: entry.supplier_id,
-            reference_type: 'reversal',
-            reference_id: ledgerEntry.id,
-            debit: '0.00',
-            credit: parseFloat(ledgerEntry.debit).toFixed(2),
-            balance: '0.00',
-            description: `Reversal of expense-desk payment: ${ledgerEntry.description}`,
-            transaction_date: new Date(),
-            created_by: req.user?.id,
-          },
-          { transaction: dbTransaction }
-        );
-        await ledgerEntry.destroy({ transaction: dbTransaction });
+        await deleteSupplierPaymentCascade(ledgerEntry, dbTransaction);
+        supplierLedgerHandled = true;
+      } else if (entry.supplier_id) {
+        // Ledger row already gone — still make sure balances are right.
         await recalculateBalances(entry.supplier_id, dbTransaction);
       }
     }
 
-    // Reverse bank balance if bank payment
-    if (entry.payment_method === 'bank' && entry.bank_id) {
-      const bank = await Bank.findByPk(entry.bank_id, { transaction: dbTransaction });
-      if (bank) {
-        const newBal = parseFloat(bank.balance) + parseFloat(entry.amount);
-        await bank.update({ balance: newBal.toFixed(2) }, { transaction: dbTransaction });
-        await BankTransaction.create(
-          {
-            bank_id: entry.bank_id,
-            transaction_type: 'in',
-            amount: parseFloat(entry.amount).toFixed(2),
-            description: `Reversal: ${entry.description}`,
-            balance_after: newBal.toFixed(2),
-            created_by: req.user?.id,
-            transaction_date: new Date(),
+    // Everything else (expenses, bill payments, and supplier payments whose
+    // ledger row no longer exists): undo the bank and cashbook side directly.
+    if (!supplierLedgerHandled) {
+      const amount = parseFloat(entry.amount) || 0;
+
+      if (entry.payment_method === 'bank' && entry.bank_id && amount > 0) {
+        const bank = await Bank.findByPk(entry.bank_id, { transaction: dbTransaction });
+        if (bank) {
+          // The 'out' row was written with the same timestamp as entry_time.
+          const originalTxn = await BankTransaction.findOne({
+            where: {
+              bank_id: entry.bank_id,
+              transaction_type: 'out',
+              amount: amount.toFixed(2),
+              transaction_date: entry.entry_time,
+            },
+            order: [['id', 'DESC']],
+            transaction: dbTransaction,
+          });
+          await bank.update(
+            { balance: (parseFloat(bank.balance) + amount).toFixed(2) },
+            { transaction: dbTransaction }
+          );
+          if (originalTxn) await originalTxn.destroy({ transaction: dbTransaction });
+        }
+      }
+
+      if (entry.entry_type === 'supplier_payment' && entry.cheque_id) {
+        await Cheque.destroy({ where: { id: entry.cheque_id }, transaction: dbTransaction });
+      }
+
+      // Cash expenses / bill payments wrote a cashbook row keyed to this entry.
+      for (const model of [models.SimpleCashbook, models.Cashbook]) {
+        if (!model) continue;
+        await model.destroy({
+          where: {
+            source_type: { [Op.in]: ['daily_expense', 'bill_payment'] },
+            reference_id: entry.id,
           },
-          { transaction: dbTransaction }
-        );
+          transaction: dbTransaction,
+        });
       }
     }
 
@@ -1148,7 +1166,9 @@ exports.deleteEntry = async (req, res) => {
     const updatedSession = await DailyExpenseSession.findByPk(sessionId);
     return res.json({
       success: true,
-      message: 'Entry deleted and session recalculated',
+      message: entry.entry_type === 'supplier_payment'
+        ? 'Supplier payment deleted from expenses, supplier ledger, bank and cashbook'
+        : 'Entry deleted and session recalculated',
       data: {
         session: {
           ...updatedSession.toJSON(),
@@ -1162,3 +1182,6 @@ exports.deleteEntry = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+// Shared with supplierPaymentController so deleting a payment from the
+// supplier screen also fixes that day's cash-desk totals.
+exports.recalculateSession = recalculateSession;

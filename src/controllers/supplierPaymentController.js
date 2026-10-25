@@ -1,8 +1,10 @@
 // backend/src/controllers/supplierPaymentController.js
 const { Op } = require('sequelize');
-const { SupplierLedger, Supplier, Bank, BankTransaction, Cheque, sequelize } = require('../models');
+const { SupplierLedger, Supplier, Bank, BankTransaction, Cheque, DailyExpense, DailyExpenseSession, sequelize } = require('../models');
 const { recalculateBalances } = require('./supplierLedgerController');
 const { createCashbookEntry } = require('./cashbookController');
+const { deleteSupplierPaymentCascade } = require('../services/supplierPaymentCleanup');
+const { recalculateSession } = require('./dailyExpenseController');
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ✅ CREATE SUPPLIER PAYMENT + AUTO BANK TRANSACTION
@@ -270,11 +272,11 @@ exports.getSupplierPayments = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ✅ DELETE SUPPLIER PAYMENT
-//    - Deletes the original BankTransaction (no reversal row created)
-//    - Deletes the linked Cheque row
-//    - Deletes the cashbook entry
-//    - Recalculates supplier balance
+// ✅ DELETE SUPPLIER PAYMENT  (hard delete — never writes reversal rows)
+//    - Deletes the ledger row, its BankTransaction, Cheque and cashbook rows
+//    - Deletes the linked DailyExpense row (cash-desk payments) and
+//      recalculates that day's session totals
+//    - Recalculates the supplier's running balances
 // ═══════════════════════════════════════════════════════════════════════════
 exports.deleteSupplierPayment = async (req, res) => {
   const dbTransaction = await sequelize.transaction();
@@ -296,111 +298,46 @@ exports.deleteSupplierPayment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Payment not found' });
     }
 
-    const paymentAmount = parseFloat(entry.debit);
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 1: Reverse bank balance + DELETE original bank transaction
-    // ═══════════════════════════════════════════════════════════════════════
-    if ((entry.payment_method === 'bank' || entry.payment_method === 'cheque') && entry.bank_id) {
-      const bank = await Bank.findByPk(entry.bank_id, { transaction: dbTransaction });
-
-      if (bank) {
-        const newBankBalance = parseFloat(bank.balance) + paymentAmount;
-        await bank.update(
-          { balance: newBankBalance.toFixed(2) },
-          { transaction: dbTransaction }
-        );
-
-        // Find the matching original bank transaction and DELETE it (no reversal)
-        const originalTxn = await BankTransaction.findOne({
-          where: {
-            bank_id: entry.bank_id,
-            transaction_type: 'out',
-            amount: paymentAmount.toFixed(2),
-            reference_number: entry.cheque_number || entry.reference_number,
-            // Narrow by date to reduce chance of collision
-            transaction_date: entry.transaction_date,
-          },
+    // ── Was this payment made from the daily expense (cash desk) screen? ──
+    const linkedExpense = DailyExpense
+      ? await DailyExpense.findOne({
+          where: { supplier_ledger_id: entry.id },
           transaction: dbTransaction,
-          order: [['id', 'DESC']],
-        });
+        })
+      : null;
 
-        if (originalTxn) {
-          await originalTxn.destroy({ transaction: dbTransaction });
-        }
+    if (linkedExpense) {
+      const session = await DailyExpenseSession.findByPk(linkedExpense.session_id, {
+        transaction: dbTransaction,
+      });
+      if (session && session.is_closed) {
+        await dbTransaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `This payment was made from the cash desk on ${session.session_date}, and that day's session is closed. Re-open the session before deleting it.`,
+        });
       }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 2: Delete cheque record
-    // ═══════════════════════════════════════════════════════════════════════
-    if (entry.cheque_number && entry.reference_id) {
-      await Cheque.destroy({
-        where: { id: entry.reference_id },
-        transaction: dbTransaction
-      });
+    // ── Hard delete: ledger row, bank txn, cheque, cashbook + recalc ──────
+    // No reversal rows are created.
+    const { closingBalance } = await deleteSupplierPaymentCascade(entry, dbTransaction);
+
+    // ── Remove the matching daily-expense row and fix that day's totals ──
+    if (linkedExpense) {
+      const sessionId = linkedExpense.session_id;
+      await linkedExpense.destroy({ transaction: dbTransaction });
+      await recalculateSession(sessionId, dbTransaction);
     }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 3: Delete cashbook entries
-    // ═══════════════════════════════════════════════════════════════════════
-    const { SimpleCashbook, Cashbook } = require('../models');
-
-    const simpleCashbookEntry = await SimpleCashbook.findOne({
-      where: { source_type: 'supplier_payment', reference_id: entry.id },
-      transaction: dbTransaction,
-    });
-    if (simpleCashbookEntry) {
-      await SimpleCashbook.destroy({
-        where: { source_type: 'supplier_payment', reference_id: entry.id },
-        transaction: dbTransaction,
-      });
-    }
-
-    const cashbookEntry = await Cashbook.findOne({
-      where: { source_type: 'supplier_payment', reference_id: entry.id },
-      transaction: dbTransaction,
-    });
-    if (cashbookEntry) {
-      await Cashbook.destroy({
-        where: { source_type: 'supplier_payment', reference_id: entry.id },
-        transaction: dbTransaction,
-      });
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 4: Delete original payment entry
-    // ═══════════════════════════════════════════════════════════════════════
-    await entry.destroy({ transaction: dbTransaction });
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 5: Recalculate supplier ledger balances
-    // ═══════════════════════════════════════════════════════════════════════
-    const remainingEntries = await SupplierLedger.findAll({
-      where: { supplier_id: supplierId },
-      order: [['transaction_date', 'ASC'], ['id', 'ASC']],
-      transaction: dbTransaction,
-    });
-
-    let runningBalance = 0;
-    for (const remainingEntry of remainingEntries) {
-      runningBalance += parseFloat(remainingEntry.credit) - parseFloat(remainingEntry.debit);
-      await remainingEntry.update({ balance: runningBalance.toFixed(2) }, { transaction: dbTransaction });
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 6: Update supplier balance
-    // ═══════════════════════════════════════════════════════════════════════
-    await Supplier.update(
-      { balance: runningBalance.toFixed(2) },
-      { where: { id: supplierId }, transaction: dbTransaction }
-    );
 
     await dbTransaction.commit();
 
     return res.json({
       success: true,
-      message: 'Payment deleted successfully from all records'
+      message: linkedExpense
+        ? 'Payment deleted from supplier ledger, daily expenses, bank and cashbook'
+        : 'Payment deleted successfully from all records',
+      data: { closing_balance: closingBalance },
     });
 
   } catch (error) {
